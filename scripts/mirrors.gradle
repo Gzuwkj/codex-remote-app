@@ -1,0 +1,24 @@
+// Optional repository mirrors for local Android builds in China.
+gradle.beforeSettings { settings ->
+    settings.pluginManagement.repositories {
+        maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/public' }
+    }
+}
+allprojects {
+    afterEvaluate {
+        def javaExtension = extensions.findByName('java')
+        if (javaExtension != null && System.getProperty('remoteapp.useJdk21') == 'true') {
+            javaExtension.toolchain.languageVersion = JavaLanguageVersion.of(21)
+        }
+    }
+    buildscript.repositories {
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/public' }
+    }
+    repositories {
+        maven { url 'https://maven.aliyun.com/repository/google' }
+        maven { url 'https://maven.aliyun.com/repository/public' }
+    }
+}

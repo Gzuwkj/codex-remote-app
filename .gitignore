@@ -1,0 +1,10 @@
+node_modules/
+.state/
+artifacts/
+*.log
+.env
+dist/
+*.jks
+*.keystore
+!apps/mobile/android/app/debug.keystore
+*signing*.properties

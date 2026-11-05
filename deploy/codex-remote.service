@@ -1,0 +1,29 @@
+[Unit]
+Description=Codex Remote authenticated WebSocket relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=codex-relay
+Group=codex-relay
+WorkingDirectory=/srv/codex-remote/current
+Environment=NODE_ENV=production
+Environment=BIND_HOST=127.0.0.1
+Environment=PORT=28787
+Environment=REMOTE_STATE_DIR=/srv/codex-remote/state
+Environment=TRUST_PROXY=1
+ExecStart=/usr/local/bin/node /srv/codex-remote/current/relay.mjs
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/codex-remote/state
+MemoryMax=192M
+TasksMax=64
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
