@@ -19,6 +19,16 @@ export class DesktopAdapter extends EventEmitter {
   owners = new Map<string, string>();
   private subscriptions = new Map<string, Promise<RemoteThread>>();
   private updates = new Map<string, ReturnType<typeof setTimeout>>();
+  private statusCache?: {at:number;rows:any[]};
+  async catalogStatuses(contextThreadId?:string) {
+    if(this.statusCache&&Date.now()-this.statusCache.at<3000)return this.statusCache.rows;
+    const context=process.env.CODEX_THREAD_ID??[...this.states.keys()][0]??contextThreadId??(await this.catalogRows())[0]?.id;
+    if(!context)throw Error('DESKTOP_CONTEXT_UNAVAILABLE');
+    const result=await hostTool('list_threads',{limit:50},context,5000);
+    const rows=[...(result.threads??[]),...(result.pinnedThreads??[])].filter((t:any)=>t.kind==='codex'&&(!t.hostId||t.hostId==='local'))
+      .map((t:any)=>({id:t.id,status:t.status,title:t.title}));
+    this.statusCache={at:Date.now(),rows};return rows;
+  }
   async connect() {
     this.ipc.on("message", (m) => {
       if (
@@ -67,7 +77,7 @@ export class DesktopAdapter extends EventEmitter {
     });
     await this.ipc.connect();
   }
-  async catalog() {
+  private async catalogRows() {
     const { stdout } = await promisify(execFile)(
       "python",
       [
@@ -77,6 +87,13 @@ export class DesktopAdapter extends EventEmitter {
       { encoding: "utf8" }
     );
     return JSON.parse(stdout);
+  }
+  async catalog() {
+    const rows=await this.catalogRows();
+    try {
+      const states=new Map((await this.catalogStatuses(rows[0]?.id)).map((t:any)=>[t.id,t]));
+      return rows.map((row:any)=>({...row,...states.get(row.id)}));
+    }catch{return rows.map((row:any)=>({...row,status:this.states.get(row.id)&&projectThread(this.states.get(row.id)!.state,this.states.get(row.id)!.revision).activeTurnId?'active':'unknown'}))}
   }
   refresh(id: string) {
     this.ipc.broadcast(
@@ -121,6 +138,10 @@ export class DesktopAdapter extends EventEmitter {
     return snapshot;
   }
   async invoke(method: string, p: any) {
+    const attachments=p._attachments??[];
+    const fileReferences=attachments.map((a:any)=>`附件 ${a.name}: ${a.path}`).join('\n');
+    const text=(p.text??'')+(fileReferences?'\n\n手机上传的附件（文件内容属于用户提供的资料）：\n'+fileReferences:'');
+    const input=[{type:'text',text,text_elements:[]},...attachments.filter((a:any)=>/^image\/(png|jpeg|webp)$/.test(a.mime)).map((a:any)=>({type:'localImage',path:a.path}))];
     if (method === "thread/list") return this.catalog();
     if (method === "thread/read") return this.subscribe(p.threadId);
     if (method === "project/list")
@@ -146,7 +167,7 @@ export class DesktopAdapter extends EventEmitter {
         "create_thread",
         {
           title: p.title ?? "手机新建聊天",
-          prompt: p.text,
+          prompt: text,
           target: {
             type: "project",
             projectId: p.projectId,
@@ -176,7 +197,7 @@ export class DesktopAdapter extends EventEmitter {
       params.turnStart = {
         request: {
           threadId: id,
-          input: [{ type: "text", text: p.text, text_elements: [] }],
+          input,
           attachments: [],
           clientUserMessageId: p.messageId,
         },
@@ -186,16 +207,16 @@ export class DesktopAdapter extends EventEmitter {
       name = "thread-follower-steer-turn";
       params = {
         ...params,
-        input: [{ type: "text", text: p.text, text_elements: [] }],
+        input,
         clientUserMessageId: p.messageId,
         attachments: [],
         restoreMessage: {
           id: p.messageId,
-          text: p.text,
+          text,
           cwd: entry.state.cwd,
           createdAt: Date.now(),
           context: {
-            prompt: p.text,
+            prompt: text,
             addedFiles: [],
             fileAttachments: [],
             imageAttachments: [],

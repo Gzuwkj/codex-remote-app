@@ -4,6 +4,7 @@ export type RemoteItem = {
   text: string;
   status?: string;
   image?: string;
+  attachments?: {id:string;name:string}[];
 };
 export type RemoteThread = {
   id: string;

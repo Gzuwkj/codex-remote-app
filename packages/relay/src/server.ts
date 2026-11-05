@@ -10,8 +10,13 @@ import { mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import path from "node:path";
 import {ThreadFanout} from './thread-fanout.js';
 import {CompletionStore} from './completion-store.js';
+import {createLogger} from '../../protocol/src/node-logger.js';
+import {diagnosticError} from '../../protocol/src/diagnostics.js';
 const dir = path.resolve(process.env.REMOTE_STATE_DIR ?? ".state");
 mkdirSync(dir, { recursive: true });
+const logger=createLogger(path.join(dir,'logs'),'relay');
+logger.log('relay.start',{version:'0.5.0'});
+process.on('uncaughtExceptionMonitor',error=>logger.log('process.fatal',{errorCode:diagnosticError(error)},'ERROR'));
 const credentialFile = path.join(dir, "bridge-token");
 let bridgeToken: string;
 try {
@@ -44,6 +49,7 @@ const pending = new Map<
   { socket: WebSocket; name: string; expires: number; code: string; deltas?: boolean }
 >();
 const routes = new Map<string, WebSocket>();
+const commandStarts = new Map<string,number>();
 const readRoutes = new Map<string, string>();
 const streams = new ThreadFanout(threadId => send(bridge, {type:'stream.resync',threadId}));
 const attempts = new Map<string, { count: number; reset: number }>();
@@ -64,7 +70,12 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocketServer({ server, maxPayload: 16 * 1024 * 1024 });
 const deviceList = () => Object.entries(devices).map(([id, device]) => ({ id, name: device.name }));
 const alive = new WeakSet<WebSocket>();
+const connections = new WeakMap<WebSocket,{id:string;role:string;device?:string}>();
+function auditConnection(ws:WebSocket,phase:string,code?:number){
+  logger.log('connection.'+phase,{...connections.get(ws),closeCode:code});
+}
 wss.on("connection", (ws, req) => {
+  connections.set(ws,{id:randomUUID().slice(0,8),role:'unauthenticated'});
   alive.add(ws);
   ws.on('pong', () => alive.add(ws));
   const deadline = setTimeout(() => {
@@ -77,8 +88,9 @@ wss.on("connection", (ws, req) => {
   }, 15000);
   ws.on("error", () => {});
   ws.on("message", (raw) => {
+    let m:any;
     try {
-      const m = JSON.parse(raw.toString());
+      m = JSON.parse(raw.toString());
       if (m.type === "bridge.auth") {
         if (
           !equal(String(m.token ?? ""), bridgeToken) ||
@@ -88,6 +100,7 @@ wss.on("connection", (ws, req) => {
           return;
         }
         bridge = ws;
+        connections.get(ws)!.role='bridge';auditConnection(ws,'authenticated');
         streams.reset();
         epoch = m.epoch;
         pairCode = String(m.pairCode);
@@ -118,8 +131,9 @@ wss.on("connection", (ws, req) => {
           devices[id] = { name: p.name, tokenHash: hash(token) };
           save();
           clients.set(p.socket, id);
+          Object.assign(connections.get(p.socket)!,{role:'app',device:hash(id).slice(0,12)});auditConnection(p.socket,'paired');
           streams.register(p.socket, p.deltas === true);
-          send(p.socket, { type: "paired", deviceId: id, token, epoch });
+          send(p.socket, { type: "paired", deviceId: id, token, epoch, connectionPing:true });
           pairCode = "";
           send(ws, { type: "devices", devices: deviceList() });
           return;
@@ -135,6 +149,7 @@ wss.on("connection", (ws, req) => {
         if (m.type === "event") {
           if (m.method === 'task.completed') {
             const event = completionStore.append(m.completion);
+            logger.log('completion.received',{threadId:m.completion.threadId,id:m.completion.eventId,duplicate:!event,cursor:event?.cursor});
             if (event) for (const c of clients.keys()) if (notificationClients.has(c)) send(c,{type:'completion',...event});
             send(ws,{type:'completion.received',eventId:m.completion.eventId});
             return;
@@ -144,11 +159,12 @@ wss.on("connection", (ws, req) => {
           return;
         }
         const target = routes.get(m.id);
+        if(target&&['command.result','outcome.unknown'].includes(m.type))logger.log('command.returned',{commandId:m.id,stage:m.type,elapsedMs:Date.now()-(commandStarts.get(m.id)??Date.now()),errorCode:m.error?diagnosticError(m.error):undefined});
         if (target && m.type === 'command.result' && m.result?.id === readRoutes.get(m.id) && Array.isArray(m.result.items))
           m.result = streams.readResult(target, m.result);
         send(target, m);
         if (m.type === "command.result" || m.type === "outcome.unknown")
-          { routes.delete(m.id); readRoutes.delete(m.id); }
+          { routes.delete(m.id); readRoutes.delete(m.id); commandStarts.delete(m.id); }
         return;
       }
       if (m.type === "device.auth") {
@@ -158,10 +174,12 @@ wss.on("connection", (ws, req) => {
           return;
         }
         clients.set(ws, m.deviceId);
+        Object.assign(connections.get(ws)!,{role:m.notificationClient===true?'notifications':'app',device:hash(m.deviceId).slice(0,12)});auditConnection(ws,'authenticated');
         if (m.notificationClient === true) notificationClients.add(ws);
         streams.register(ws, m.snapshotDeltas === true, m.threadId);
         clearTimeout(deadline);
         send(ws, { type: "host", online: bridge?.readyState === 1, epoch,
+          connectionPing:true,
           ...(m.notificationClient === true ? {notificationCursor:completionStore.latest()} : {}) });
         if (m.notificationClient === true && Number.isInteger(m.notificationCursor) && m.notificationCursor >= 0)
           for (const event of completionStore.after(m.notificationCursor)) send(ws,{type:'completion',...event});
@@ -201,6 +219,11 @@ wss.on("connection", (ws, req) => {
         return;
       }
       if (!clients.has(ws)) throw Error("AUTH_REQUIRED");
+      if(m.type==='connection.ping'){
+        logger.log('connection.probe',{...connections.get(ws),id:m.id,online:bridge?.readyState===1});
+        if(typeof m.id==='string'&&m.id.length<=100)send(ws,{type:'connection.pong',id:m.id,online:bridge?.readyState===1,epoch,connectionPing:true});
+        return;
+      }
       if (m.type === 'stream.applied') {
         if (typeof m.threadId === 'string' && Number.isFinite(m.revision) && Number.isFinite(m.sentAtMs) && Number.isFinite(m.paintedAtMs))
           send(bridge, {type:'stream.applied',deviceId:clients.get(ws),threadId:m.threadId,revision:m.revision,sentAtMs:m.sentAtMs,paintedAtMs:m.paintedAtMs});
@@ -216,7 +239,9 @@ wss.on("connection", (ws, req) => {
           throw Error("INVALID_COMMAND");
         if (!bridge || bridge.readyState !== 1) throw Error("HOST_OFFLINE");
         const routeId = clients.get(ws) + ":" + m.id;
+        logger.log('command.forwarded',{...connections.get(ws),commandId:routeId,method:m.method,threadId:m.params?.threadId,epoch});
         routes.set(routeId, ws);
+        commandStarts.set(routeId,Date.now());
         if (m.method === 'thread/read' && typeof m.params?.threadId === 'string') {
           streams.select(ws, m.params.threadId); readRoutes.set(routeId, m.params.threadId);
         }
@@ -226,15 +251,19 @@ wss.on("connection", (ws, req) => {
       }
       throw Error("UNKNOWN_MESSAGE");
     } catch (error) {
-      send(ws, { type: "error", error: (error as Error).message });
+      logger.log('request.failed',{...connections.get(ws),method:m?.method,errorCode:diagnosticError(error)},'WARN');
+      if(clients.has(ws)&&m?.type==='command'&&typeof m.id==='string'&&m.id.length<=100)
+        send(ws,{type:'command.result',id:clients.get(ws)+':'+m.id,error:(error as Error).message});
+      else send(ws, { type: "error", error: (error as Error).message });
     }
   });
-  ws.on("close", () => {
+  ws.on("close", (code) => {
+    auditConnection(ws,'closed',code);
     clearTimeout(deadline);
     clients.delete(ws);
     streams.remove(ws);
     for (const [id, p] of pending) if (p.socket === ws) pending.delete(id);
-    for (const [id, c] of routes) if (c === ws) { routes.delete(id); readRoutes.delete(id); }
+    for (const [id, c] of routes) if (c === ws) { routes.delete(id); readRoutes.delete(id); commandStarts.delete(id); }
     if (ws === bridge) {
       bridge = undefined;
       for (const c of clients.keys())
@@ -252,7 +281,7 @@ setInterval(() => {
 }, 5000).unref();
 setInterval(() => {
   for (const socket of wss.clients) {
-    if (!alive.has(socket)) { socket.terminate(); continue; }
+    if (!alive.has(socket)) { auditConnection(socket,'heartbeat-expired');socket.terminate(); continue; }
     alive.delete(socket); socket.ping();
   }
 }, 30000).unref();

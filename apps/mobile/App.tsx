@@ -33,6 +33,8 @@ import Clipboard from '@react-native-clipboard/clipboard';
 import Markdown from 'react-native-markdown-display';
 import { client, type Thread } from './src/client';
 import {enableNotifications, disableNotifications, restoreNotifications, notificationStatus, type NotificationStatus} from './src/notifications';
+import {readDiagnostics,exportDiagnostics} from './src/diagnostics';
+import {pickAttachments,uploadAttachments,type PhoneAttachment} from './src/attachments';
 import { RequestCard } from './src/RequestCard';
 import { MarkdownImage, isDesktopFile } from './src/MarkdownImage';
 import {
@@ -52,7 +54,7 @@ import {
   workLabel,
   type DisplayRow,
 } from './src/presentation';
-type Outbox = { id: string; threadId: string; text: string; status: string };
+type Outbox = { id: string; threadId: string; text: string; status: string; attachments?:PhoneAttachment[] };
 const readThreadCache = async (id: string): Promise<string | null> => {
   const saved = await NativeModules.RemoteArtifacts?.readSnapshot(id);
   if (saved) return saved;
@@ -66,6 +68,7 @@ type Sheet =
   | 'queue'
   | 'message'
   | 'requests'
+  | 'diagnostics'
   | null;
 const errorText = (e: any) => {
   const v = e?.message ?? String(e);
@@ -98,8 +101,34 @@ function RemoteScreen() {
     [error, setError] = useState(''),
     [notice, setNotice] = useState('');
   const [notifications, setNotifications] = useState<NotificationStatus>({enabled:false,permitted:false,connected:false,running:false});
+  const [connectionMessage,setConnectionMessage]=useState('正在连接中转');
   const openChatRef = useRef<(id:string)=>Promise<void>>(async()=>{});
   const notificationBusy = useRef(false);
+  const [diagnosticLog,setDiagnosticLog]=useState('');
+  const [attachments,setAttachments]=useState<PhoneAttachment[]>([]);
+  const [attachmentProgress,setAttachmentProgress]=useState<Record<string,number>>({});
+  const attachmentRef=useRef<PhoneAttachment[]>([]),attachmentScope=useRef('');
+  const saveAttachments=(files:PhoneAttachment[])=>{
+    attachmentRef.current=files;setAttachments(files);
+    if(attachmentScope.current)AsyncStorage.setItem('attachments:'+attachmentScope.current,JSON.stringify(files));
+  };
+  const clearSentAttachments=async(scope:string,sent:PhoneAttachment[])=>{
+    const ids=new Set(sent.map(f=>f.id));
+    const saved=JSON.parse(await AsyncStorage.getItem('attachments:'+scope)??'[]').filter((f:PhoneAttachment)=>!ids.has(f.id));
+    await AsyncStorage.setItem('attachments:'+scope,JSON.stringify(saved));
+    if(attachmentScope.current===scope){attachmentRef.current=saved;setAttachments(saved);}
+    setAttachmentProgress({});
+  };
+  const selectPhoneAttachments=async(images:boolean)=>{
+    setSheet(null);Keyboard.dismiss();
+    const scope=attachmentScope.current;
+    try{
+      const files=await pickAttachments(images);
+      if(attachmentScope.current!==scope)return;
+      if(attachmentRef.current.length+files.length>5){toast('每条消息最多添加 5 个附件');return;}
+      saveAttachments([...attachmentRef.current,...files]);
+    }catch(e){toast(errorText(e));}
+  };
   const [catalog, setCatalog] = useState<any[]>([]),
     [projects, setProjects] = useState<any[]>([]),
     [project, setProject] = useState<string | null>(null),
@@ -108,6 +137,14 @@ function RemoteScreen() {
     [thread, setThread] = useState<Thread | null>(null),
     [draft, setDraft] = useState(''),
     [newPrompt, setNewPrompt] = useState('');
+  useEffect(()=>{
+    const scope=screen==='chat'?client.selected??'':screen==='new'?'new:'+(project??''):'';
+    if(attachmentScope.current===scope)return;
+    attachmentScope.current=scope;attachmentRef.current=[];setAttachments([]);
+    if(scope)AsyncStorage.getItem('attachments:'+scope).then(value=>{
+      if(attachmentScope.current===scope){const files=JSON.parse(value??'[]');attachmentRef.current=files;setAttachments(files);}
+    }).catch(()=>{});
+  },[screen,thread?.id,project]);
   const [sending, setSending] = useState(false),
     [stopping, setStopping] = useState(false),
     [refreshing, setRefreshing] = useState(false),
@@ -208,7 +245,10 @@ function RemoteScreen() {
         setError('');
         refreshRef.current();
       }
-      if (m.type === 'offline') setOnline(false);
+      if (m.type === 'offline') {
+        setOnline(false);
+        setConnectionMessage(m.reason==='host'?'电脑离线':m.reason==='reconnecting'?'正在连接中转':'网络中断，正在重连');
+      }
       if (m.type === 'pair.pending') {
         setConnecting(true);
         toast('请在电脑上确认连接');
@@ -216,6 +256,10 @@ function RemoteScreen() {
       if (m.type === 'error') {
         setConnecting(false);
         setError(errorText(m.error));
+      }
+      if(m.type==='event'&&m.method==='catalog.status'){
+        const states=new Map(m.statuses.map((t:any)=>[t.id,t]));
+        setCatalog(previous=>previous.map(row=>({...row,...(states.get(row.id) as object??{})})));
       }
       if (
         m.type === 'event' &&
@@ -270,11 +314,11 @@ function RemoteScreen() {
       }
     })();
     const sub = AppState.addEventListener('change', state => {
+      client.setForeground(state === 'active');
       if (state === 'active' && client.credentials) {
         refreshNotifications();
         openFromNotification();
-        if (client.online) refreshRef.current();
-        else client.connect();
+        client.resume().then(alive=>{if(alive)refreshRef.current()});
       }
     });
     return () => {
@@ -400,7 +444,8 @@ function RemoteScreen() {
     if (!selectedProject && registered.length) setProject(registered[0].path);
   };
   const create = async () => {
-    const text = newPrompt.trim();
+    const selectedFiles=[...attachmentRef.current],scope=attachmentScope.current;
+    const text = newPrompt.trim()||(selectedFiles.length?'请查看附件。':'');
     if (!text || sendingRef.current) return;
     if (!selectedProject) {
       setSheet('projects');
@@ -411,7 +456,9 @@ function RemoteScreen() {
     setError('');
     Keyboard.dismiss();
     try {
+      const uploaded=await uploadAttachments(selectedFiles,(id,percent)=>setAttachmentProgress(p=>({...p,[id]:percent})));
       const result = await client.rpc('thread/start', {
+        attachments:uploaded,
         projectId: selectedProject.projectId,
         contextThreadId: catalog.find(
           t => normalizePath(t.cwd) === normalizePath(selectedProject.path),
@@ -421,6 +468,7 @@ function RemoteScreen() {
       });
       if (!result.threadId) throw Error('聊天正在准备，请稍后在列表刷新查看。');
       setNewPrompt('');
+      await clearSentAttachments(scope,selectedFiles);
       await openChat(result.threadId);
       refreshRef.current();
     } catch (e) {
@@ -431,7 +479,8 @@ function RemoteScreen() {
     }
   };
   const send = async () => {
-    const text = draftRef.current.trim(),
+    const selectedFiles=[...attachmentRef.current],scope=attachmentScope.current;
+    const text = draftRef.current.trim()||(selectedFiles.length?'请查看附件。':''),
       id = client.selected;
     if (!text || !id || sendingRef.current) return;
     sendingRef.current = true;
@@ -440,12 +489,13 @@ function RemoteScreen() {
     Keyboard.dismiss();
     follow.current = true;
     const existing = queueRef.current.find(
-        q => q.threadId === id && q.text === text && q.status === '待发送',
+        q => q.threadId === id && q.text === text && q.status === '待发送' && JSON.stringify(q.attachments?.map(f=>f.id)??[])===JSON.stringify(selectedFiles.map(f=>f.id)),
       ),
       entry: Outbox = existing ?? {
         id: Date.now().toString(36) + '-' + Math.random().toString(36).slice(2),
         threadId: id,
         text,
+        attachments:selectedFiles,
         status: '待发送',
       };
     try {
@@ -463,12 +513,15 @@ function RemoteScreen() {
           q.id === entry.id ? { ...q, status: '正在发送' } : q,
         ),
       );
+      const uploaded=await uploadAttachments(selectedFiles,(fileId,percent)=>setAttachmentProgress(p=>({...p,[fileId]:percent})));
       await client.rpc(thread?.activeTurnId ? 'turn/steer' : 'turn/start', {
+        attachments:uploaded,
         threadId: id,
         text,
         messageId: entry.id,
       });
       await persistQueue(queueRef.current.filter(q => q.id !== entry.id));
+      await clearSentAttachments(scope,selectedFiles);
       if (client.selected === id && draftRef.current.trim() === text)
         updateDraft('');
     } catch (e) {
@@ -700,6 +753,14 @@ function RemoteScreen() {
             <Text selectable style={[s.messageText, { color: c.text }]}>
               {item.text}
             </Text>
+            {item.attachments?.map((file:any)=><Pressable key={file.id} accessibilityLabel={'打开附件 '+file.name}
+              onPress={async()=>{
+                setDetail({id:file.id,type:/\.(png|jpg|jpeg|webp)$/i.test(file.name)?'imageView':'phoneAttachment',name:file.name,loading:true});
+                try{const value=await client.rpc('attachment/read',{id:file.id});setDetail((previous:any)=>previous?.id===file.id?{...previous,...value,previewError:value.text,loading:false}:previous)}
+                catch{setDetail((previous:any)=>previous?.id===file.id?{...previous,loading:false,previewError:'附件加载失败，请返回后重试。',text:'附件加载失败，请返回后重试。'}:previous)}
+              }} style={{paddingVertical:8,flexDirection:'row',alignItems:'center',gap:8}}>
+              <Icon name="file" size={16} color={c.muted}/><Text numberOfLines={1} style={{color:c.text,fontSize:13,flex:1}}>{file.name}</Text>
+            </Pressable>)}
           </Pressable>
         </View>
       );
@@ -742,7 +803,8 @@ function RemoteScreen() {
 
   const composer = (isNew: boolean) => {
     const text = isNew ? newPrompt : draft,
-      active = !isNew && !!thread?.activeTurnId;
+      active = !isNew && !!thread?.activeTurnId,
+      hasContent=!!text.trim()||attachments.length>0;
     return (
       <View style={[s.composerArea, { backgroundColor: c.bg }]}>
         {!!thread?.requests.length && !isNew && (
@@ -768,6 +830,19 @@ function RemoteScreen() {
             { backgroundColor: c.surface, borderColor: c.line },
           ]}
         >
+          {!!attachments.length&&<ScrollView horizontal contentContainerStyle={{padding:10,gap:10}}>
+            {attachments.map(file=><View key={file.id} style={{width:120,padding:8,borderRadius:14,backgroundColor:c.soft}}>
+              <Pressable accessibilityLabel={'预览附件 '+file.name} onPress={()=>{
+                if(file.mime.startsWith('image/'))setDetail({id:file.id,type:'imageView',dataUri:file.uri});
+                else toast(file.name+' · '+(file.size/1024).toFixed(1)+' KB');
+              }}>
+                {file.mime.startsWith('image/')?<Image source={{uri:file.uri}} style={{width:104,height:68,borderRadius:8}}/>:<Icon name="file" color={c.muted} size={32}/>}
+                <Text numberOfLines={1} style={{fontSize:12,color:c.text,marginTop:5}}>{file.name}</Text>
+                {attachmentProgress[file.id]!==undefined&&<Text style={{fontSize:11,color:c.muted}}>上传 {attachmentProgress[file.id]}%</Text>}
+              </Pressable>
+              <Pressable accessibilityLabel={'移除附件 '+file.name} disabled={sending} onPress={()=>saveAttachments(attachmentRef.current.filter(f=>f.id!==file.id))} style={{paddingTop:8}}><Text style={{color:c.muted,fontSize:12}}>移除</Text></Pressable>
+            </View>)}
+          </ScrollView>}
           <TextInput
             accessibilityLabel={isNew ? '新聊天消息' : '消息输入'}
             multiline
@@ -802,7 +877,7 @@ function RemoteScreen() {
               )}
             </View>
             <View style={ui.row}>
-              {active && !!text.trim() && (
+              {active && hasContent && (
                 <IconButton
                   name="stop"
                   label="停止任务"
@@ -815,7 +890,7 @@ function RemoteScreen() {
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={
-                  active && !text.trim()
+                  active && !hasContent
                     ? '停止'
                     : isNew
                     ? '创建并发送'
@@ -826,21 +901,21 @@ function RemoteScreen() {
                     : '保存待发送'
                 }
                 disabled={
-                  active && !text.trim()
+                  active && !hasContent
                     ? !online || stopping
-                    : !text.trim() || sending || (isNew && !online)
+                    : !hasContent || sending || (isNew && !online)
                 }
-                onPress={active && !text.trim() ? stop : isNew ? create : send}
+                onPress={active && !hasContent ? stop : isNew ? create : send}
                 style={({ pressed }) => [
                   s.send,
                   {
                     backgroundColor: c.button,
                     opacity:
-                      active && !text.trim()
+                      active && !hasContent
                         ? stopping
                           ? 0.35
                           : 1
-                        : !text.trim() || sending
+                        : !hasContent || sending
                         ? 0.22
                         : pressed
                         ? 0.7
@@ -852,7 +927,7 @@ function RemoteScreen() {
                   <ActivityIndicator size="small" color={c.buttonText} />
                 ) : (
                   <Icon
-                    name={active && !text.trim() ? 'stop' : 'up'}
+                    name={active && !hasContent ? 'stop' : 'up'}
                     color={c.buttonText}
                     size={21}
                   />
@@ -863,7 +938,7 @@ function RemoteScreen() {
         </View>
         <Text style={[s.composerHint, { color: c.muted }]}>
           {!online
-            ? '电脑离线 · 草稿会保留'
+            ? connectionMessage+' · 草稿会保留'
             : active
             ? '正在电脑上工作，可随时追加要求或停止'
             : 'Codex 在你的电脑上运行'}
@@ -924,6 +999,17 @@ function RemoteScreen() {
         </>
       );
     }
+    if (sheet === 'diagnostics')
+      return <>
+        <Text selectable style={{color:c.text,fontSize:12,fontFamily:'monospace',lineHeight:18}}>{JSON.stringify(client.diagnostics(),null,2)}</Text>
+        {actionRow('refresh','刷新诊断日志',async()=>setDiagnosticLog(await readDiagnostics()))}
+        {actionRow('copy','导出日志到下载目录',async()=>{
+          try{await exportDiagnostics();toast('日志已导出到 Downloads/CodexRemote');}
+          catch{toast('日志导出失败，请重试');}
+        })}
+        <Text style={{color:c.muted,fontSize:13,lineHeight:20,marginVertical:12}}>日志不包含配对码、令牌或聊天正文。保留最近约 3MB；下方显示最近 128KB。</Text>
+        <Text selectable style={{color:c.text,fontSize:11,fontFamily:'monospace',lineHeight:17}}>{diagnosticLog||'暂无日志'}</Text>
+      </>;
     if (sheet === 'connection')
       return (
         <>
@@ -934,7 +1020,7 @@ function RemoteScreen() {
             <View style={{ flex: 1 }}>
               <Text style={[s.sheetLabel, { color: c.text }]}>我的电脑</Text>
               <Text style={[ui.muted, { color: c.muted, marginTop: 4 }]}>
-                {online ? '已连接' : '离线 · 任务会继续在电脑上运行'}
+                {online ? '已连接' : connectionMessage+' · 任务仍在电脑运行'}
               </Text>
             </View>
             <View
@@ -964,6 +1050,7 @@ function RemoteScreen() {
             catch(e) {setNotifications(await notificationStatus());toast(errorText(e));}
           })}
           {actionRow('more', '系统通知设置', () => NativeModules.TaskNotifications.openSettings())}
+          {actionRow('monitor','连接诊断与日志',async()=>{setDiagnosticLog(await readDiagnostics());setSheet('diagnostics')})}
           {actionRow('close', '解除本机配对', async () => {
             await disableNotifications();
             await client.disconnect();
@@ -1018,7 +1105,7 @@ function RemoteScreen() {
               }
               onPress={async () => {
                 await openChat(q.threadId);
-                if (q.status === '待发送') updateDraft(q.text);
+                if (q.status === '待发送') {updateDraft(q.text);saveAttachments(q.attachments??[]);}
               }}
               style={s.textAction}
             >
@@ -1045,6 +1132,8 @@ function RemoteScreen() {
       ));
     return (
       <>
+        {(screen==='chat'||screen==='new')&&actionRow('plus','添加截图或图片',()=>selectPhoneAttachments(true))}
+        {(screen==='chat'||screen==='new')&&actionRow('file','添加手机文件',()=>selectPhoneAttachments(false))}
         {screen === 'chat' &&
           actionRow('refresh', '刷新聊天', () => {
             setSheet(null);
@@ -1082,6 +1171,8 @@ function RemoteScreen() {
       ? '选择项目'
       : sheet === 'connection'
       ? '计算机'
+      : sheet === 'diagnostics'
+      ? '连接诊断与日志'
       : sheet === 'queue'
       ? '待发送记录'
       : sheet === 'message'
@@ -1092,6 +1183,8 @@ function RemoteScreen() {
   const imageDetail = detail?.type === 'imageView',
     detailTitle = imageDetail
       ? '图片'
+      : detail?.type==='phoneAttachment'
+      ? detail.name??'附件'
       : detail?.type === 'commandExecution'
       ? '终端输出'
       : detail?.type === 'fileChange'
@@ -1341,7 +1434,7 @@ function RemoteScreen() {
                 ]}
               >
                 <View style={[s.chatIcon, { backgroundColor: c.surface }]}>
-                  <Icon name="file" size={19} color={c.muted} />
+                  {online&&item.status==='active'?<ActivityIndicator accessibilityLabel="会话正在进行" size="small" color={c.text}/>:<Icon name="file" size={19} color={c.muted} />}
                 </View>
                 <View style={{ flex: 1 }}>
                   <Text
@@ -1360,6 +1453,7 @@ function RemoteScreen() {
                     )?.label ?? pathName(item.cwd)}
                   </Text>
                 </View>
+                {item.status==='active'&&<Text style={{color:c.muted,fontSize:12,marginRight:8}}>{online?'进行中':'状态待同步'}</Text>}
                 <Icon name="chevron" size={16} color={c.muted} />
               </Pressable>
             )}
@@ -1418,7 +1512,7 @@ function RemoteScreen() {
                             normalizePath(p.path ?? '') ===
                             normalizePath(thread?.cwd ?? ''),
                         )?.label ?? pathName(thread?.cwd ?? '')
-                      : '电脑离线 · 正在显示已保存的聊天'}
+                      : connectionMessage+' · 正在显示已保存的聊天'}
                   </Text>
                 </Pressable>
               </View>
@@ -1606,12 +1700,14 @@ function RemoteScreen() {
                     onPress={() => openChat(item.id)}
                     style={[
                       s.drawerChat,
+                      {flexDirection:'row',alignItems:'center'},
                       {
                         backgroundColor:
                           client.selected === item.id ? c.soft : 'transparent',
                       },
                     ]}
                   >
+                    {online&&item.status==='active'&&<ActivityIndicator accessibilityLabel="侧栏会话正在进行" size="small" color={c.text} style={{marginRight:8}}/>}
                     <Text
                       numberOfLines={1}
                       style={{ color: c.text, fontSize: 14 }}

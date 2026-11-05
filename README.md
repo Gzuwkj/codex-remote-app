@@ -2,11 +2,11 @@
 
 Android React Native 客户端、国内中转服务和 Windows 桌面 Bridge。当前版本仍在开发与验收中，不能作为“完整功能已对齐”的交付。
 
-## 当前云端发布 0.4.0
+## 当前云端发布 0.5.0
 
 已部署至用户指定云服务器，默认 WSS：`wss://daxuechengminiapp.site/codex-remote/ws`。
 
-- [正式签名 APK](https://daxuechengminiapp.site/codex-remote/downloads/codex-remote-0.4.0.apk)；包名 `com.remoteapp.mobile`，ARM64+x86_64，内置 JS。
+- [正式签名 APK](https://daxuechengminiapp.site/codex-remote/downloads/codex-remote-0.5.0.apk)；包名 `com.remoteapp.mobile`，ARM64+x86_64，内置 JS。
 - 云中转通过既有 Nginx HTTPS 独立路径提供服务，`codex-remote.service` 开机自启。
 - 本机登录项已注册 watcher，Bridge 随 Codex 桌面主进程启动/停止；仅关闭窗口但进程仍在运行时继续连接。
 - 双击 `E:/Codex/content/secure/remoteapp/Open Codex Remote.cmd` 打开电脑配对控制页，显示配对码、确认手机与撤销授权。页面只监听本机，入口中不硬编码凭据。
@@ -76,3 +76,7 @@ npm run android
 ## 0.4.0 图标与任务通知
 
 安装图标已按用户要求使用 ChatGPT 图形。配对后允许系统通知，即可在后台接收已连接聊天的任务完成提醒，点击打开对应聊天；“连接信息”可关闭或打开。后台连接保留安静的常驻通知，断线恢复补发，强停后需重开。桌面图标、权限、后台通知、点击路由、飞行模式补发及开关均通过 Android 模拟器真实操作；26 测试通过。[发布与验收边界](docs/notifications/index.md)。
+
+## 0.5.0 重连、诊断与附件
+
+修复旧连接回调覆盖当前状态，增加建立超时和前台失活探测。三端日志记录连接、命令阶段与耗时并自动脱敏轮转；App 可在连接信息中查看/导出。加号支持手机图片/文件，最多5个、每个20MB；传到当前电脑同一聊天，支持进度与离线保留。列表从桌面真实状态同步 loading/进行中。Android 已实际验证系统选择器、图像识别、文本读取、历史预览、断网恢复、待发送不重复、状态切换和日志导出；35项测试通过。[验收与边界](docs/reliability-attachments/index.md)。

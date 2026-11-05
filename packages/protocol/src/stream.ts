@@ -20,7 +20,7 @@ export function threadUpdate(
       p.type !== i.type ||
       p.text !== i.text ||
       p.status !== i.status ||
-      p.image !== i.image
+      p.image !== i.image || JSON.stringify(p.attachments??[])!==JSON.stringify(i.attachments??[])
     );
   });
   const orderChanged =

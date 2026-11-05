@@ -59,7 +59,7 @@ internal object NotificationState {
 }
 
 class NotificationPackage : ReactPackage {
-  override fun createNativeModules(c: ReactApplicationContext): List<NativeModule> = listOf(TaskNotificationModule(c))
+  override fun createNativeModules(c: ReactApplicationContext): List<NativeModule> = listOf(TaskNotificationModule(c), DiagnosticsModule(c), PhoneAttachmentsModule(c))
   override fun createViewManagers(c: ReactApplicationContext): List<ViewManager<*, *>> = emptyList()
 }
 class TaskNotificationModule(private val c: ReactApplicationContext) : ReactContextBaseJavaModule(c) {
@@ -72,6 +72,7 @@ class TaskNotificationModule(private val c: ReactApplicationContext) : ReactCont
     })
   }
   @ReactMethod fun configure(url: String, deviceId: String, token: String, promise: Promise) {
+    Diagnostics.write(c, "notification.configure", JSONObject().put("url", url), role = "notifications")
     try {
       require(url.startsWith("wss://")) { "后台通知需要安全的中转地址" }
       require(NotificationState.permitted(c)) { "请先允许系统通知权限" }
@@ -88,6 +89,7 @@ class TaskNotificationModule(private val c: ReactApplicationContext) : ReactCont
     }
   }
   @ReactMethod fun disable(promise: Promise) {
+    Diagnostics.write(c, "notification.disabled", role = "notifications")
     NotificationState.prefs(c).edit().putBoolean("enabled", false).remove("credentials").remove("cursor").commit()
     c.stopService(Intent(c, TaskNotificationService::class.java)); promise.resolve(null)
   }
@@ -109,6 +111,7 @@ class TaskNotificationService : Service() {
   private var retries = 0
   override fun onBind(intent: Intent?) = null
   override fun onCreate() {
+    Diagnostics.write(this, "notification.service-start", role = "notifications")
     super.onCreate(); NotificationState.running = true
     val manager = getSystemService(NotificationManager::class.java)
     if (Build.VERSION.SDK_INT >= 26) {
@@ -128,6 +131,7 @@ class TaskNotificationService : Service() {
     return NotificationCompat.Builder(this, "task_listener").setSmallIcon(R.drawable.ic_notification).setContentTitle("Codex Remote · 任务通知").setContentText(text).setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true).setSilent(true).build()
   }
   private fun connection(online: Boolean, text: String) {
+    Diagnostics.write(this, "notification.connection", JSONObject().put("online", online), role = "notifications")
     NotificationState.connected = online
     getSystemService(NotificationManager::class.java).notify(4100, statusNotification(text))
   }
@@ -135,6 +139,7 @@ class TaskNotificationService : Service() {
     if (stopped) return
     val config = try { NotificationState.credentials(this) } catch (_: Exception) { stopSelf(); return }
     val current = ++generation
+    Diagnostics.write(this, "notification.connecting", JSONObject().put("attempt", retries), role = "notifications")
     socket = http.newWebSocket(Request.Builder().url(config.getString("url")).build(), object : WebSocketListener() {
       override fun onOpen(ws: WebSocket, response: Response) {
         ws.send(JSONObject().put("type", "device.auth").put("deviceId", config.getString("deviceId")).put("token", config.getString("token")).put("snapshotDeltas", true).put("notificationClient", true).put("notificationCursor", NotificationState.prefs(this@TaskNotificationService).getLong("cursor", -1)).toString())
@@ -153,9 +158,12 @@ class TaskNotificationService : Service() {
           }
         } catch (_: Exception) { connection(false, "任务通知异常，正在重新连接"); ws.close(1002, "INVALID_EVENT") }
       }
-      override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) { retry(current) }
+      override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
+        Diagnostics.write(this@TaskNotificationService, "notification.socket-error", JSONObject().put("errorCode", t.javaClass.simpleName), "WARN", "notifications"); retry(current)
+      }
       override fun onClosing(ws: WebSocket, code: Int, reason: String) { ws.close(code, reason) }
       override fun onClosed(ws: WebSocket, code: Int, reason: String) {
+        Diagnostics.write(this@TaskNotificationService, "notification.closed", JSONObject().put("closeCode", code), role = "notifications")
         if (code == 4003) { NotificationState.prefs(this@TaskNotificationService).edit().putBoolean("enabled", false).remove("credentials").commit(); handler.post { stopSelf() } }
         else retry(current)
       }
@@ -175,6 +183,7 @@ class TaskNotificationService : Service() {
     if (!NotificationState.permitted(this)) return
     val id = m.getString("threadId"); require(Regex("[a-zA-Z0-9_-]{1,100}").matches(id))
     val event = m.getString("eventId")
+    Diagnostics.write(this, "notification.completion", JSONObject().put("threadId", id).put("id", event).put("cursor", cursor).put("foreground", NotificationState.visible), role = "notifications")
     if (!NotificationState.visible) {
       val intent = Intent(this, MainActivity::class.java).setData(Uri.parse("codexremote://chat/" + Uri.encode(id))).putExtra("notificationThread", id).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
       val open = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
@@ -185,6 +194,7 @@ class TaskNotificationService : Service() {
     check(p.edit().putLong("cursor", cursor).commit())
   }
   override fun onDestroy() {
+    Diagnostics.write(this, "notification.service-stop", role = "notifications")
     stopped = true; generation++; handler.removeCallbacksAndMessages(null); socket?.cancel(); socket = null
     http.dispatcher.executorService.shutdown(); http.connectionPool.evictAll()
     NotificationState.connected = false; NotificationState.running = false

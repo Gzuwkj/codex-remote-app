@@ -3,7 +3,7 @@ import path from "node:path";
 import { randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 
-export function startAdmin(dir: string, relayUrl: string, send: (value: unknown) => void) {
+export function startAdmin(dir: string, relayUrl: string, send: (value: unknown) => void, logs?:()=>string) {
   const tokenFile = path.join(dir, "admin-token");
   let token: string;
   try { token = readFileSync(tokenFile, "utf8"); }
@@ -19,6 +19,7 @@ export function startAdmin(dir: string, relayUrl: string, send: (value: unknown)
     if (!/^[a-f0-9]{64}$/.test(supplied) || supplied.length !== token.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) { res.writeHead(401); res.end(); return; }
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     if (req.url === "/api/status" && req.method === "GET") { res.end(JSON.stringify(state)); return; }
+    if (req.url === '/api/logs' && req.method === 'GET') {res.end(JSON.stringify({text:logs?.()??''}));return;}
     if (req.url !== "/api/action" || req.method !== "POST") { res.writeHead(404); res.end(); return; }
     try {
       let body = "";
@@ -61,9 +62,11 @@ const page = `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name
 <h1>Codex Remote · 电脑连接</h1><p id="connection">正在读取连接状态…</p><p id="error" role="status"></p>
 <section><h2>连接手机</h2><p>在手机 App 输入下方配对码，再回到此页面确认设备。</p><div id="code">—</div><small id="expiry"></small><br><button id="refresh">刷新配对码</button><div id="pending"></div></section>
 <section><h2>已授权设备</h2><div id="devices"></div></section><p>Bridge 随 Codex 桌面进程启动和停止。此控制页只在本机开放。</p>
+<section><h2>连接诊断日志</h2><p>仅记录连接和命令阶段，不包含配对码、令牌或聊天正文。</p><button id="load-logs">刷新诊断日志</button><pre id="logs" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:400px;overflow:auto;font-size:12px"></pre></section>
 <script>const token=location.hash.slice(1);history.replaceState(null,'',location.pathname);let current;
 async function call(route,body){const r=await fetch('/api/'+route,{method:body?'POST':'GET',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});if(!r.ok){let e=await r.json().catch(()=>({}));throw Error(e.error||'无法访问电脑连接控制，请从本机启动入口重新打开')}return r.json()}
 async function action(action,id){try{await call('action',{action,id});document.querySelector('#error').textContent='';await refresh()}catch(e){document.querySelector('#error').textContent=e.message}}
 function button(text,fn){const b=document.createElement('button');b.textContent=text;b.onclick=fn;return b}
 async function refresh(){try{current=await call('status');document.querySelector('#connection').textContent=(current.connected?'已连接云端中转 · ':'电脑离线 · ')+current.relayUrl;document.querySelector('#code').textContent=current.pairCode&&current.expiresAt>Date.now()?current.pairCode:'—';document.querySelector('#expiry').textContent=current.pairCode?'配对码有效期至 '+new Date(current.expiresAt).toLocaleTimeString():'点击刷新获取新配对码';const pending=document.querySelector('#pending');pending.replaceChildren();for(const item of current.pending){const row=document.createElement('div');row.className='row';const title=document.createElement('p');title.textContent=item.name+' 请求连接';row.append(title,button('允许连接',()=>action('approve',item.id)),button('拒绝',()=>action('reject',item.id)));pending.append(row)}const devices=document.querySelector('#devices');devices.replaceChildren();for(const item of current.devices){const row=document.createElement('div');row.className='row';row.textContent=item.name;row.append(button('撤销授权',()=>{if(confirm('撤销此设备的连接权限？'))action('revoke',item.id)}));devices.append(row)}if(!current.devices.length)devices.textContent='尚无已授权设备'}catch(e){document.querySelector('#error').textContent=e.message}}
+document.querySelector('#load-logs').onclick=async()=>{try{document.querySelector('#logs').textContent=(await call('logs')).text||'暂无日志'}catch(e){document.querySelector('#error').textContent=e.message}};
 document.querySelector('#refresh').onclick=()=>action('pair');refresh();setInterval(refresh,2000);</script></html>`;

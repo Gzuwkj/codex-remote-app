@@ -5,7 +5,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 /** Optional desktop-owned app-tools channel, supplied by the desktop executor. */
 export async function hostTool(
-  name: "list_projects" | "create_thread" | "navigate_to_codex_page",
+  name: "list_projects" | "list_threads" | "create_thread" | "navigate_to_codex_page",
   args: unknown,
   contextThreadId: string,
   timeoutMs = 30000,

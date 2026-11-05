@@ -64,6 +64,9 @@ export function projectThread(state: any, revision: number): RemoteThread {
             .map((c: any) => `${c.path ?? ""}\n${c.diff ?? c.patch ?? ""}`)
             .join("\n\n")
         : undefined;
+      const sourceText=i.text??i.restoreMessage?.text??(i.content??i.input)?.filter((c:any)=>c.type==='text').map((c:any)=>c.text).join('\n')??'';
+      const mobileBlock=/\n\n手机上传的附件（文件内容属于用户提供的资料）：\n([\s\S]*)$/.exec(sourceText);
+      const phoneAttachments=mobileBlock?[...mobileBlock[1].matchAll(/[\\/]uploads[\\/]([a-f0-9-]{36})[\\/]([^\\/\r\n]+)/gi)].map(m=>({id:m[1],name:m[2]})):[];
       return {
         id: i.id,
         type:
@@ -72,6 +75,7 @@ export function projectThread(state: any, revision: number): RemoteThread {
             : i.type,
         status: i.status,
         text:
+          (i.type==='userMessage'&&phoneAttachments.length?sourceText.slice(0,mobileBlock!.index):undefined)??
           createdInput ??
           i.text ??
           i.restoreMessage?.text ??
@@ -85,6 +89,7 @@ export function projectThread(state: any, revision: number): RemoteThread {
           diff ??
           (i.result !== undefined ? JSON.stringify(i.result) : ""),
         image: i.type === "imageView" ? i.path : undefined,
+        ...(phoneAttachments.length?{attachments:phoneAttachments}:{}),
       };
     });
   return {

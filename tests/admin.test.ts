@@ -7,12 +7,14 @@ test('local pairing console requires its secret and same origin; decisions bind 
   const base = path.resolve('.state');
   const dir = mkdtempSync(path.join(base,'admin-test-'));
   process.env.BRIDGE_ADMIN_PORT='18898';
-  const sent: any[] = [], admin = startAdmin(dir, 'wss://example.test/ws', m => sent.push(m));
+  const sent: any[] = [], admin = startAdmin(dir, 'wss://example.test/ws', m => sent.push(m),()=>'{"event":"dedicated-test"}');
   await new Promise<void>(r => admin.server.once('listening', r));
   const url='http://127.0.0.1:18898', token=readFileSync(path.join(dir,'admin-token'),'utf8');
   const headers={Authorization:'Bearer '+token,'Content-Type':'application/json'};
   try {
     assert.equal((await fetch(url+'/api/status')).status,401);
+    assert.equal((await fetch(url+'/api/logs')).status,401);
+    assert.equal((await(await fetch(url+'/api/logs',{headers})).json() as any).text,'{"event":"dedicated-test"}');
     assert.equal((await fetch(url+'/api/status',{headers:{Authorization:'Bearer '+'é'.repeat(64)}})).status,401);
     assert.equal((await fetch(url+'/api/status',{headers:{...headers,Origin:'https://untrusted.test'}})).status,403);
     admin.message({type:'bridge.ready'});

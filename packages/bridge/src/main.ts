@@ -10,13 +10,21 @@ import {startAdmin} from './admin.js';
 import {ThreadPublisher} from './thread-publisher.js';
 import {projectThread} from '../../protocol/src/index.js';
 import {CompletionTracker} from './completions.js';
+import {createLogger} from '../../protocol/src/node-logger.js';
+import {diagnosticError} from '../../protocol/src/diagnostics.js';
+import {UploadStore} from './uploads.js';
 const dir = path.resolve(process.env.REMOTE_STATE_DIR ?? ".state");
 mkdirSync(dir, { recursive: true });
+const logger=createLogger(path.join(dir,'logs'),'bridge');
+logger.log('bridge.start',{version:'0.5.0'});
+process.on('uncaughtExceptionMonitor',error=>logger.log('process.fatal',{errorCode:diagnosticError(error)},'ERROR'));
 acquireLock(path.join(dir,'bridge.lock'));
 const completions = new CompletionTracker(path.join(dir,'task-completions.json'));
+const uploads=new UploadStore(path.join(dir,'uploads'));
 let epoch = randomUUID();
 let adapter = new DesktopAdapter();
 await adapter.connect();
+logger.log('desktop.connected');
 const ledgerFile = path.join(dir, "commands.json");
 const ledger = loadJournal(ledgerFile);
 const save = () => {
@@ -33,7 +41,7 @@ const send = (m: unknown) => {
 };
 const publisher = new ThreadPublisher((method, value) => send({ type:'event', epoch, seq:++seq, method, ...value, sentAtMs:Date.now() }), () => ws?.bufferedAmount ?? Infinity);
 const managed = process.env.BRIDGE_MANAGED === '1';
-const admin = managed ? startAdmin(dir, process.env.RELAY_URL ?? 'ws://127.0.0.1:8787', send) : undefined;
+const admin = managed ? startAdmin(dir, process.env.RELAY_URL ?? 'ws://127.0.0.1:8787', send, logger.tail) : undefined;
 if (managed && /^\d+$/.test(process.env.CODEX_DESKTOP_PID ?? '')) {
   const desktopPid = Number(process.env.CODEX_DESKTOP_PID);
   setInterval(() => {
@@ -42,18 +50,37 @@ if (managed && /^\d+$/.test(process.env.CODEX_DESKTOP_PID ?? '')) {
   }, 2000).unref();
 }
 function attach() {
+  const sampled=new Map<string,{at:number;active?:string}>();
   adapter.on('thread', thread => {
+    const last=sampled.get(thread.id);
+    if(!last||Date.now()-last.at>=5000||last.active!==thread.activeTurnId){
+      logger.log('desktop.thread',{threadId:thread.id,revision:thread.revision,activeTurnId:thread.activeTurnId,status:thread.lastTurnStatus,bytes:Buffer.byteLength(JSON.stringify(thread))});
+      sampled.set(thread.id,{at:Date.now(),active:thread.activeTurnId});
+    }
     publisher.push(thread);
     completions.observe(thread);
     for (const completion of completions.pending()) send({type:'event',epoch,seq:++seq,method:'task.completed',completion});
   });
   adapter.once("offline", () => {
+    logger.log('desktop.disconnected',{},'WARN');
     online = false;
     ws?.close(4004, "DESKTOP_OFFLINE");
     reconnectDesktop();
   });
 }
 attach();
+let lastStatuses='',statusPending=false;
+setInterval(async()=>{
+  if(!online||ws?.readyState!==1||statusPending)return;
+  statusPending=true;
+  try{
+    const statuses=await adapter.catalogStatuses();
+    const signature=JSON.stringify(statuses.map(t=>({id:t.id,status:t.status})));
+    if(signature!==lastStatuses){lastStatuses=signature;send({type:'event',epoch,seq:++seq,method:'catalog.status',statuses});logger.log('catalog.status',{count:statuses.length});}
+    for(const t of statuses)if(t.status==='active'&&!adapter.states.has(t.id))adapter.subscribe(t.id).catch(error=>logger.log('catalog.subscribe-failed',{threadId:t.id,errorCode:diagnosticError(error)},'WARN'));
+  }catch(error){logger.log('catalog.status-failed',{errorCode:diagnosticError(error)},'WARN')}
+  finally{statusPending=false}
+},5000).unref();
 async function reconnectDesktop() {
   try {
     const next = new DesktopAdapter();
@@ -83,14 +110,18 @@ rl.on("line", (line) => {
 function connect() {
   if (!online) return;
   const url = process.env.RELAY_URL ?? "ws://127.0.0.1:8787";
+  logger.log('relay.connecting',{url,epoch});
   if (
     !url.startsWith("wss://") &&
     !/^ws:\/\/(127\.0\.0\.1|localhost)(:|\/)/.test(url)
   )
     throw Error("WSS_REQUIRED");
-  ws = new WebSocket(url, { maxPayload: 16 * 1024 * 1024 });
+  ws = new WebSocket(url, { maxPayload: 16 * 1024 * 1024, handshakeTimeout:12000 });
   ws.on("open", () => {
+    if(ws!==current)return;
+    logger.log('relay.socket-open',{epoch});
     publisher.reset();
+    lastStatuses='';
     const pairCode = String(randomInt(100000, 1000000));
     send({
       type: "bridge.auth",
@@ -101,9 +132,11 @@ function connect() {
     admin?.pairedCode(pairCode);
     if (!managed) console.log("Pair code (5 minutes, single use): " + pairCode);
   });
-  ws.on("error", () => {});
+  ws.on("error", error => logger.log('relay.error',{errorCode:diagnosticError(error)},'WARN'));
   const current = ws;
-  ws.on("close", () => {
+  ws.on("close", (closeCode) => {
+    if(ws!==current){logger.log('relay.stale-close-ignored',{closeCode});return;}
+    logger.log('relay.closed',{closeCode},'WARN');
     publisher.reset();
     admin?.offline();
     if (ws === current && online)
@@ -112,12 +145,14 @@ function connect() {
       }, 2000);
   });
   ws.on("message", async (raw) => {
+    if(ws!==current)return;
     let m: any;
     try {
       m = JSON.parse(raw.toString());
       admin?.message(m);
       if (m.type === 'completion.received') { completions.acknowledge(m.eventId); return; }
       if (m.type === 'bridge.ready') {
+        logger.log('relay.authenticated',{epoch});
         for (const completion of completions.pending()) send({type:'event',epoch,seq:++seq,method:'task.completed',completion});
         for (const id of completions.watched()) adapter.subscribe(id).catch(()=>{});
       }
@@ -135,9 +170,15 @@ function connect() {
         return;
       }
       if (m.type !== "command") return;
+      const commandStarted=Date.now();
+      logger.log('command.received',{commandId:m.id,method:m.method,threadId:m.params?.threadId,epoch});
       if (m.epoch !== epoch) {
         send({ type: "command.result", id: m.id, error: "STALE_RUNTIME" });
         return;
+      }
+      if(m.method.startsWith('attachment/')){
+        const result=await uploads.invoke(m.method,m.params??{},m.deviceId);
+        send({type:'command.result',id:m.id,result});logger.log('upload.request-completed',{commandId:m.id,method:m.method,elapsedMs:Date.now()-commandStarted});return;
       }
       if (m.method === "command/status") {
         const e = ledger[m.params.id];
@@ -151,6 +192,7 @@ function connect() {
       // Read-only queries are repeatable; keep histories and binary chunks out of the write ledger.
       if (["artifact/read", "artifact/info", "artifact/chunk", "thread/read", "thread/list", "project/list", "model/read"].includes(m.method)) {
         const result = await adapter.invoke(m.method, m.params ?? {});
+        logger.log('command.completed',{commandId:m.id,method:m.method,elapsedMs:Date.now()-commandStarted});
         send({ type: "command.result", id: m.id, result });
         return;
       }
@@ -159,6 +201,7 @@ function connect() {
         .digest("hex");
       const existing = ledger[m.id];
       if (existing) {
+        logger.log('command.duplicate',{commandId:m.id,method:m.method,status:existing.status});
         if (existing.fingerprint !== fingerprint)
           throw Error("IDEMPOTENCY_CONFLICT");
         send({
@@ -178,11 +221,14 @@ function connect() {
       save();
       send({ type: "bridge.accepted", id: m.id });
       try {
-        const result = await adapter.invoke(m.method, m.params ?? {});
+        const attachments=await uploads.resolve(m.params?.attachments??[],m.deviceId);
+        const result = await adapter.invoke(m.method, { ...(m.params??{}), _attachments:attachments });
         ledger[m.id] = { fingerprint, status: "done", result };
+        logger.log('command.completed',{commandId:m.id,method:m.method,elapsedMs:Date.now()-commandStarted});
         save();
         send({ type: "command.result", id: m.id, result });
       } catch (error) {
+        logger.log('command.failed',{commandId:m.id,method:m.method,errorCode:diagnosticError(error),elapsedMs:Date.now()-commandStarted},'WARN');
         const text = (error as Error).message;
         const unknown =
           /TIMEOUT|DISCONNECTED/.test(text) &&
@@ -205,6 +251,7 @@ function connect() {
         });
       }
     } catch (error) {
+      logger.log('request.failed',{commandId:m?.id,method:m?.method,errorCode:diagnosticError(error)},'WARN');
       send({
         type: "command.result",
         id: m?.id,

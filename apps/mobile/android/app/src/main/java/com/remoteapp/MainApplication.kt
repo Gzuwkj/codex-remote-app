@@ -21,6 +21,7 @@ class MainApplication : Application(), ReactApplication {
     get() = getDefaultReactHost(applicationContext, reactNativeHost)
   override fun onCreate() {
     super.onCreate()
+    Diagnostics.write(this, "app.process-start")
     loadReactNative(this)
   }
 }

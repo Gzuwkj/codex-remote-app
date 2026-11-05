@@ -43,7 +43,8 @@ test("relay requires authentication, desktop approval, one-time pairing, and dev
   );
   t.after(() => processHandle.kill());
   await new Promise<void>((resolve, reject) => {
-    processHandle.stdout.once("data", () => resolve());
+    const ready=(data:Buffer)=>{if(data.toString().includes('Relay listening')){processHandle.stdout.off('data',ready);resolve()}};
+    processHandle.stdout.on("data", ready);
     processHandle.once("error", reject);
     processHandle.once("exit", (code) => {
       if (code) reject(Error("RELAY_EXIT"));
@@ -112,6 +113,12 @@ test("relay requires authentication, desktop approval, one-time pairing, and dev
     })
   );
   assert.deepEqual((await result).result, ["thread-test"]);
+  const pong=wait(phone,m=>m.type==='connection.pong');
+  phone.send(JSON.stringify({type:'connection.ping',id:'dedicated-foreground-probe'}));
+  assert.equal((await pong).online,true);
+  const invalid=wait(phone,m=>m.type==='command.result'&&m.id===device.deviceId+':invalid-test');
+  phone.send(JSON.stringify({type:'command',id:'invalid-test',method:null}));
+  assert.equal((await invalid).error,'INVALID_COMMAND');
   // Dedicated notification connections receive durable completions, never transcript snapshots.
   const completion = {eventId:'safe:turn1',threadId:'safe',turnId:'turn1',title:'Dedicated test',status:'completed',completedAt:Date.now()};
   const receipt = wait(bridge, m => m.type === 'completion.received');
