@@ -1,3 +1,5 @@
+import type {RemoteThread, RemoteItem} from './types.js';
+export type {RemoteThread, RemoteItem} from './types.js';
 export const protocolVersion = 1;
 export type CommandStage =
   | "relay.received"
@@ -10,24 +12,6 @@ export type Command = {
   epoch: string;
   method: string;
   params: Record<string, unknown>;
-};
-export type RemoteItem = {
-  id: string;
-  type: string;
-  text: string;
-  status?: string;
-  image?: string;
-};
-export type RemoteThread = {
-  id: string;
-  title: string;
-  cwd: string;
-  model?: string;
-  revision: number;
-  activeTurnId?: string;
-  lastTurnStatus?: string;
-  items: RemoteItem[];
-  requests: any[];
 };
 export function applyPatches(state: any, patches: any[]): any {
   let result = structuredClone(state);

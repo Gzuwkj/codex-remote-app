@@ -227,7 +227,7 @@ function RemoteScreen() {
         if (id) {
           const cached = await readThreadCache(id);
           if (cached) {
-            client.selected = id;
+            client.select(id);
             const value = JSON.parse(cached);
             setThread(value);
             setTitles({ [id]: value.title });
@@ -289,7 +289,7 @@ function RemoteScreen() {
   };
   const goHome = () => {
     Keyboard.dismiss();
-    client.selected = undefined;
+    client.select(undefined);
     setThread(null);
     setScreen('home');
     setError('');
@@ -333,7 +333,7 @@ function RemoteScreen() {
     setJump(false);
     follow.current = true;
     wasActive.current = false;
-    client.selected = id;
+    client.select(id);
     try {
       const [cached, text] = await Promise.all([
         readThreadCache(id),
@@ -365,7 +365,7 @@ function RemoteScreen() {
     Keyboard.dismiss();
     if (drawer) closeDrawer();
     setSheet(null);
-    client.selected = undefined;
+    client.select(undefined);
     setThread(null);
     setError('');
     setScreen('new');
@@ -927,7 +927,7 @@ function RemoteScreen() {
           })}
           {actionRow('close', '解除本机配对', async () => {
             await client.disconnect();
-            client.selected = undefined;
+            client.select(undefined);
             setPaired(false);
             setThread(null);
             setScreen('home');
@@ -1394,7 +1394,13 @@ function RemoteScreen() {
                     data={[...rows].reverse()}
                     inverted
                     keyExtractor={row => row.id}
-                    renderItem={renderRow}
+                    renderItem={({item}) => (
+                      <MemoTranscriptRow
+                        row={item} render={renderRow} dark={dark} threadId={thread?.id}
+                        actions={item.item?.id === lastAssistant && !thread?.activeTurnId}
+                        running={item.kind === 'work' && !!thread?.activeTurnId && item.id === rows.at(-1)?.id}
+                      />
+                    )}
                     keyboardShouldPersistTaps="handled"
                     contentContainerStyle={[
                       s.transcript,
@@ -1712,6 +1718,26 @@ function RemoteScreen() {
     </SafeAreaView>
   );
 }
+const MemoTranscriptRow = React.memo(
+  ({row, render}: {
+    row: DisplayRow;
+    render: (info: {item: DisplayRow}) => React.ReactElement;
+    dark: boolean;
+    threadId?: string;
+    actions: boolean;
+    running: boolean;
+  }) => render({item: row}),
+  (a, b) => {
+    if (a.dark !== b.dark || a.threadId !== b.threadId || a.actions !== b.actions ||
+        a.running !== b.running || a.row.kind !== b.row.kind || a.row.id !== b.row.id) return false;
+    if (a.row.kind === 'work' && b.row.kind === 'work') {
+      return a.row.items!.length === b.row.items!.length &&
+        a.row.items!.every((item, i) => item === b.row.items![i]);
+    }
+    return a.row.item === b.row.item;
+  },
+);
+
 function WorkGroup({
   items,
   colors: c,

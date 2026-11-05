@@ -9,7 +9,7 @@ export function startAdmin(dir: string, relayUrl: string, send: (value: unknown)
   try { token = readFileSync(tokenFile, "utf8"); }
   catch { token = randomBytes(32).toString("hex"); writeFileSync(tokenFile, token, { mode: 0o600 }); }
   const port = Number(process.env.BRIDGE_ADMIN_PORT ?? 18887);
-  const state = { connected: false, relayUrl, pairCode: "", expiresAt: 0, pending: [] as { id: string; name: string }[], devices: [] as { id: string; name: string }[] };
+  const state = { connected: false, relayUrl, pairCode: "", expiresAt: 0, pending: [] as { id: string; name: string }[], devices: [] as { id: string; name: string }[], streams: {} as Record<string, {threadId:string;revision:number;sentAtMs:number;paintedAtMs:number;receivedAtMs:number;roundTripMs:number}> };
   const server = http.createServer(async (req, res) => {
     res.setHeader("Cache-Control", "no-store"); res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'");
@@ -47,6 +47,7 @@ export function startAdmin(dir: string, relayUrl: string, send: (value: unknown)
     server,
     pairedCode(code: string) { state.pairCode = code; state.expiresAt = Date.now() + 300000; },
     message(message: any) {
+      if (message.type === 'stream.applied') state.streams[message.deviceId] = {threadId:message.threadId,revision:message.revision,sentAtMs:message.sentAtMs,paintedAtMs:message.paintedAtMs,receivedAtMs:Date.now(),roundTripMs:Date.now()-message.sentAtMs};
       if (message.type === "bridge.ready") { state.connected = true; send({ type: "device.list" }); }
       if (message.type === "devices") state.devices = message.devices;
       if (message.type === "pair.confirm") state.pending.push({ id: message.id, name: message.name });

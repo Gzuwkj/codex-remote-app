@@ -2,15 +2,15 @@
 
 Android React Native 客户端、国内中转服务和 Windows 桌面 Bridge。当前版本仍在开发与验收中，不能作为“完整功能已对齐”的交付。
 
-## 当前云端发布 0.3.0
+## 当前云端发布 0.3.1
 
 已部署至用户指定云服务器，默认 WSS：`wss://daxuechengminiapp.site/codex-remote/ws`。
 
-- [正式签名 APK](https://daxuechengminiapp.site/codex-remote/downloads/codex-remote-0.3.0.apk)；包名 `com.remoteapp.mobile`，ARM64+x86_64，内置 JS。
+- [正式签名 APK](https://daxuechengminiapp.site/codex-remote/downloads/codex-remote-0.3.1.apk)；包名 `com.remoteapp.mobile`，ARM64+x86_64，内置 JS。
 - 云中转通过既有 Nginx HTTPS 独立路径提供服务，`codex-remote.service` 开机自启。
 - 本机登录项已注册 watcher，Bridge 随 Codex 桌面主进程启动/停止；仅关闭窗口但进程仍在运行时继续连接。
 - 双击 `E:/Codex/content/secure/remoteapp/Open Codex Remote.cmd` 打开电脑配对控制页，显示配对码、确认手机与撤销授权。页面只监听本机，入口中不硬编码凭据。
-- 云端真实配对、同会话收发/追加/停止/App 内重连与公网 APK 哈希已实测；19 项自动测试通过。实际关闭 Codex、强停 App/重启中转恢复、物理手机等未验收，详见 `E:/Codex/content/docs/codex-remote-cloud/index.md`。
+- 云端真实配对、同会话收发/追加/停止/App 内重连已实测；0.3.1 另实测流式输出、断网恢复与公网 APK 哈希，24 项自动测试通过。实际关闭 Codex、强停 App/重启中转恢复、物理手机等未验收，详见 [云端记录](docs/cloud/index.md)和[响应验收](docs/streaming/index.md)。
 
 生产打包：先运行 `./scripts/prepare-signing.ps1`（已有密钥不会替换），然后 `./scripts/build-android.ps1 -Task assembleProduction -Architectures 'x86_64,arm64-v8a'`。发布签名只读取本机受限配置；不要提交或分发私钥。
 
@@ -68,3 +68,7 @@ npm run android
 0.1 已实际操作配对、项目/聊天、新建聊天、发送、追加、停止、截图预览，以及断线、恢复、强制停止后保留草稿与待发送记录。0.2 按 APK 静态证据重写侧栏、聊天排版、输入框、工具详情与明暗主题，并重新实测主要消息操作、复制、离线队列及滚动恢复；保留配对凭据升级，未重新配对。12 项自动测试通过。UI 证据和验收见 `E:/Codex/content/docs/codex-remote-ui/index.md`，原实现边界见 `E:/Codex/content/docs/codex-remote-react-native/index.md`。
 
 `deploy/` 的 Docker/Caddy 文件是独立主机模板，未执行验证。当前实际云服务器使用 `codex-remote.service` 和 Nginx 增量配置，已有 80/443 网关；在该服务器采用当前原生部署方案，见云端记录。设备与电脑凭据通过受控 SSH 传输，不在聊天中传递。
+
+## 0.3.1 响应修复
+
+生产 APK 更新为 [0.3.1](https://daxuechengminiapp.site/codex-remote/downloads/codex-remote-0.3.1.apk)，保留原配对授权。增量传输、刷新合并、未变聊天行缓存及历史加载管道重发现已上线，需同步更新 Bridge 和中转。专用 80 行输出在 Android 模拟器实测完成确认往返 727ms；详细方法、长会话与真机边界见 [响应验收记录](docs/streaming/index.md)。

@@ -8,9 +8,11 @@ export async function hostTool(
   name: "list_projects" | "create_thread" | "navigate_to_codex_page",
   args: unknown,
   contextThreadId: string,
-  timeoutMs = 30000
+  timeoutMs = 30000,
+  discoverCurrent = false
 ) {
-  let endpoint = process.env.CODEX_APP_TOOLS_PIPE_PATH;
+  let endpoint = discoverCurrent ? undefined : process.env.CODEX_APP_TOOLS_PIPE_PATH;
+  const inheritedEndpoint = !!endpoint;
   if (!endpoint) {
     const { stdout } = await promisify(execFile)(
       "powershell.exe",
@@ -30,10 +32,18 @@ export async function hostTool(
   const socket = net.createConnection(endpoint),
     reader = new FrameReader();
   try {
-    await new Promise<void>((resolve, reject) => {
-      socket.once("connect", resolve);
-      socket.once("error", reject);
-    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        socket.once("connect", resolve);
+        socket.once("error", reject);
+      });
+    } catch (error) {
+      // A startup watcher can inherit the previous desktop's pipe. Rediscover only
+      // after a failed connection, before any tool request has been written.
+      if (inheritedEndpoint && (error as NodeJS.ErrnoException).code === 'ENOENT')
+        return hostTool(name, args, contextThreadId, timeoutMs, true);
+      throw error;
+    }
     const response = await new Promise<any>((resolve, reject) => {
       const timer = setTimeout(() => {
         reject(Error("DESKTOP_TOOL_TIMEOUT"));

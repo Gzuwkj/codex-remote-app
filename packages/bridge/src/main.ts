@@ -7,6 +7,8 @@ import readline from "node:readline";
 import {loadJournal} from './journal.js';
 import {acquireLock} from './lock.js';
 import {startAdmin} from './admin.js';
+import {ThreadPublisher} from './thread-publisher.js';
+import {projectThread} from '../../protocol/src/index.js';
 const dir = path.resolve(process.env.REMOTE_STATE_DIR ?? ".state");
 mkdirSync(dir, { recursive: true });
 acquireLock(path.join(dir,'bridge.lock'));
@@ -24,8 +26,10 @@ let ws: WebSocket;
 let seq = 0;
 let online = true;
 const send = (m: unknown) => {
-  if (ws?.readyState === 1) ws.send(JSON.stringify(m));
+  if (ws?.readyState === 1) { ws.send(JSON.stringify(m)); return true; }
+  return false;
 };
+const publisher = new ThreadPublisher((method, value) => send({ type:'event', epoch, seq:++seq, method, ...value, sentAtMs:Date.now() }), () => ws?.bufferedAmount ?? Infinity);
 const managed = process.env.BRIDGE_MANAGED === '1';
 const admin = managed ? startAdmin(dir, process.env.RELAY_URL ?? 'ws://127.0.0.1:8787', send) : undefined;
 if (managed && /^\d+$/.test(process.env.CODEX_DESKTOP_PID ?? '')) {
@@ -36,15 +40,7 @@ if (managed && /^\d+$/.test(process.env.CODEX_DESKTOP_PID ?? '')) {
   }, 2000).unref();
 }
 function attach() {
-  adapter.on("thread", (thread) =>
-    send({
-      type: "event",
-      epoch,
-      seq: ++seq,
-      method: "thread.snapshot",
-      thread,
-    })
-  );
+  adapter.on('thread', thread => publisher.push(thread));
   adapter.once("offline", () => {
     online = false;
     ws?.close(4004, "DESKTOP_OFFLINE");
@@ -88,6 +84,7 @@ function connect() {
     throw Error("WSS_REQUIRED");
   ws = new WebSocket(url, { maxPayload: 16 * 1024 * 1024 });
   ws.on("open", () => {
+    publisher.reset();
     const pairCode = String(randomInt(100000, 1000000));
     send({
       type: "bridge.auth",
@@ -101,6 +98,7 @@ function connect() {
   ws.on("error", () => {});
   const current = ws;
   ws.on("close", () => {
+    publisher.reset();
     admin?.offline();
     if (ws === current && online)
       setTimeout(() => {
@@ -112,6 +110,11 @@ function connect() {
     try {
       m = JSON.parse(raw.toString());
       admin?.message(m);
+      if (m.type === 'stream.resync') {
+        const entry = adapter.states.get(m.threadId);
+        if (entry) { publisher.reset(m.threadId); publisher.push(projectThread(entry.state, entry.revision)); }
+        return;
+      }
       if (m.type === "pair.confirm") {
         if (!managed) console.log(
           `Device ${JSON.stringify(m.name)} requests pairing. Type: approve ${
@@ -134,8 +137,8 @@ function connect() {
         });
         return;
       }
-      // Artifact reads are repeatable. Do not persist binary chunks in the command ledger.
-      if (["artifact/read", "artifact/info", "artifact/chunk"].includes(m.method)) {
+      // Read-only queries are repeatable; keep histories and binary chunks out of the write ledger.
+      if (["artifact/read", "artifact/info", "artifact/chunk", "thread/read", "thread/list", "project/list", "model/read"].includes(m.method)) {
         const result = await adapter.invoke(m.method, m.params ?? {});
         send({ type: "command.result", id: m.id, result });
         return;

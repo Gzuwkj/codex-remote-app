@@ -53,9 +53,11 @@ try:
         print('Staged relay bundle and protected device state; no credentials printed')
     elif sys.argv[1]=='publish-apk':
         import hashlib
-        local=pathlib.Path('E:/Codex/content/releases/remoteapp/20261106/codex-remote-0.3.0.apk')
+        version=sys.argv[2] if len(sys.argv)>2 else '0.3.0'
+        if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+',version):raise RuntimeError('Invalid artifact version')
+        local=pathlib.Path('E:/Codex/content/releases/remoteapp/20261106')/('codex-remote-'+version+'.apk')
         digest=hashlib.file_digest(local.open('rb'),'sha256').hexdigest()
-        remote='/srv/codex-remote/downloads/codex-remote-0.3.0.apk'
+        remote='/srv/codex-remote/downloads/codex-remote-'+version+'.apk'
         with client.open_sftp() as ftp:ftp.put(str(local),remote+'.part')
         verify="""import pathlib,hashlib,json,os
 p=pathlib.Path('/srv/codex-remote/downloads/codex-remote-0.3.0.apk.part')
@@ -65,7 +67,7 @@ p.replace(p.with_suffix(''))
 dest=p.with_suffix('');os.chmod(dest,0o644)
 (dest.parent/'codex-remote-0.3.0.sha256').write_text(h+'  '+dest.name+chr(10))
 print(json.dumps({'published':True,'sha256':h,'size':dest.stat().st_size}))
-""".replace('EXPECTED',repr(digest))
+""".replace('0.3.0',version).replace('EXPECTED',repr(digest))
         stdin,out,err=client.exec_command('python3 -',timeout=30);stdin.write(verify);stdin.channel.shutdown_write()
         output=out.read().decode();errors=err.read().decode()
         if out.channel.recv_exit_status():raise RuntimeError('Publication failed: '+errors)

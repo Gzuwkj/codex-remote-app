@@ -18,6 +18,7 @@ export class DesktopAdapter extends EventEmitter {
   states = new Map<string, { revision: number; state: any }>();
   owners = new Map<string, string>();
   private subscriptions = new Map<string, Promise<RemoteThread>>();
+  private updates = new Map<string, ReturnType<typeof setTimeout>>();
   async connect() {
     this.ipc.on("message", (m) => {
       if (
@@ -47,12 +48,20 @@ export class DesktopAdapter extends EventEmitter {
           return;
         }
       }
-      const entry = this.states.get(conversationId);
-      if (entry)
-        this.emit("thread", projectThread(entry.state, entry.revision));
+      const urgent = change.type === 'snapshot' || change.patches?.some((p: any) =>
+        p.path?.includes('requests') || (p.path?.at(-1) === 'status' && ['completed','interrupted','failed'].includes(p.value)));
+      const flush = () => {
+        const timer = this.updates.get(conversationId); if (timer) clearTimeout(timer);
+        this.updates.delete(conversationId);
+        const entry = this.states.get(conversationId);
+        if (entry) this.emit('thread', projectThread(entry.state, entry.revision));
+      };
+      if (urgent) flush();
+      else if (!this.updates.has(conversationId)) this.updates.set(conversationId, setTimeout(flush, 150));
     });
     this.ipc.on("disconnected", () => {
       this.states.clear();
+      for (const timer of this.updates.values()) clearTimeout(timer); this.updates.clear();
       this.owners.clear();
       this.emit("offline");
     });

@@ -8,6 +8,7 @@ import {
 import { WebSocketServer, WebSocket } from "ws";
 import { mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import path from "node:path";
+import {ThreadFanout} from './thread-fanout.js';
 const dir = path.resolve(process.env.REMOTE_STATE_DIR ?? ".state");
 mkdirSync(dir, { recursive: true });
 const credentialFile = path.join(dir, "bridge-token");
@@ -37,9 +38,11 @@ let epoch = "",
 const clients = new Map<WebSocket, string>();
 const pending = new Map<
   string,
-  { socket: WebSocket; name: string; expires: number; code: string }
+  { socket: WebSocket; name: string; expires: number; code: string; deltas?: boolean }
 >();
 const routes = new Map<string, WebSocket>();
+const readRoutes = new Map<string, string>();
+const streams = new ThreadFanout(threadId => send(bridge, {type:'stream.resync',threadId}));
 const attempts = new Map<string, { count: number; reset: number }>();
 const send = (ws: WebSocket | undefined, message: unknown) => {
   if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
@@ -82,6 +85,7 @@ wss.on("connection", (ws, req) => {
           return;
         }
         bridge = ws;
+        streams.reset();
         epoch = m.epoch;
         pairCode = String(m.pairCode);
         pairExpires = Date.now() + 300000;
@@ -111,6 +115,7 @@ wss.on("connection", (ws, req) => {
           devices[id] = { name: p.name, tokenHash: hash(token) };
           save();
           clients.set(p.socket, id);
+          streams.register(p.socket, p.deltas === true);
           send(p.socket, { type: "paired", deviceId: id, token, epoch });
           pairCode = "";
           send(ws, { type: "devices", devices: deviceList() });
@@ -125,13 +130,16 @@ wss.on("connection", (ws, req) => {
           return;
         }
         if (m.type === "event") {
-          for (const c of clients.keys()) send(c, m);
+          if (m.method === 'thread.snapshot' || m.method === 'thread.update') streams.publish(m);
+          else for (const c of clients.keys()) send(c, m);
           return;
         }
         const target = routes.get(m.id);
+        if (target && m.type === 'command.result' && m.result?.id === readRoutes.get(m.id) && Array.isArray(m.result.items))
+          m.result = streams.readResult(target, m.result);
         send(target, m);
         if (m.type === "command.result" || m.type === "outcome.unknown")
-          routes.delete(m.id);
+          { routes.delete(m.id); readRoutes.delete(m.id); }
         return;
       }
       if (m.type === "device.auth") {
@@ -141,6 +149,7 @@ wss.on("connection", (ws, req) => {
           return;
         }
         clients.set(ws, m.deviceId);
+        streams.register(ws, m.snapshotDeltas === true, m.threadId);
         clearTimeout(deadline);
         send(ws, { type: "host", online: bridge?.readyState === 1, epoch });
         return;
@@ -167,6 +176,7 @@ wss.on("connection", (ws, req) => {
           name: String(m.name ?? "Android").slice(0, 80),
           expires: Date.now() + 60000,
           code: pairCode,
+          deltas: m.snapshotDeltas === true,
         });
         clearTimeout(deadline);
         send(ws, { type: "pair.pending" });
@@ -178,6 +188,12 @@ wss.on("connection", (ws, req) => {
         return;
       }
       if (!clients.has(ws)) throw Error("AUTH_REQUIRED");
+      if (m.type === 'stream.applied') {
+        if (typeof m.threadId === 'string' && Number.isFinite(m.revision) && Number.isFinite(m.sentAtMs) && Number.isFinite(m.paintedAtMs))
+          send(bridge, {type:'stream.applied',deviceId:clients.get(ws),threadId:m.threadId,revision:m.revision,sentAtMs:m.sentAtMs,paintedAtMs:m.paintedAtMs});
+        return;
+      }
+      if (m.type === 'thread.select') { streams.select(ws, typeof m.threadId === 'string' ? m.threadId : undefined); return; }
       if (m.type === "command") {
         if (
           typeof m.id !== "string" ||
@@ -188,6 +204,9 @@ wss.on("connection", (ws, req) => {
         if (!bridge || bridge.readyState !== 1) throw Error("HOST_OFFLINE");
         const routeId = clients.get(ws) + ":" + m.id;
         routes.set(routeId, ws);
+        if (m.method === 'thread/read' && typeof m.params?.threadId === 'string') {
+          streams.select(ws, m.params.threadId); readRoutes.set(routeId, m.params.threadId);
+        }
         send(ws, { type: "relay.received", id: routeId });
         send(bridge, { ...m, id: routeId, deviceId: clients.get(ws) });
         return;
@@ -200,8 +219,9 @@ wss.on("connection", (ws, req) => {
   ws.on("close", () => {
     clearTimeout(deadline);
     clients.delete(ws);
+    streams.remove(ws);
     for (const [id, p] of pending) if (p.socket === ws) pending.delete(id);
-    for (const [id, c] of routes) if (c === ws) routes.delete(id);
+    for (const [id, c] of routes) if (c === ws) { routes.delete(id); readRoutes.delete(id); }
     if (ws === bridge) {
       bridge = undefined;
       for (const c of clients.keys())
