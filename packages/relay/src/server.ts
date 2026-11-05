@@ -9,6 +9,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { mkdirSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import path from "node:path";
 import {ThreadFanout} from './thread-fanout.js';
+import {CompletionStore} from './completion-store.js';
 const dir = path.resolve(process.env.REMOTE_STATE_DIR ?? ".state");
 mkdirSync(dir, { recursive: true });
 const credentialFile = path.join(dir, "bridge-token");
@@ -36,6 +37,8 @@ let epoch = "",
   pairCode = "",
   pairExpires = 0;
 const clients = new Map<WebSocket, string>();
+const notificationClients = new WeakSet<WebSocket>();
+const completionStore = new CompletionStore(path.join(dir,'completion-events.json'));
 const pending = new Map<
   string,
   { socket: WebSocket; name: string; expires: number; code: string; deltas?: boolean }
@@ -130,6 +133,12 @@ wss.on("connection", (ws, req) => {
           return;
         }
         if (m.type === "event") {
+          if (m.method === 'task.completed') {
+            const event = completionStore.append(m.completion);
+            if (event) for (const c of clients.keys()) if (notificationClients.has(c)) send(c,{type:'completion',...event});
+            send(ws,{type:'completion.received',eventId:m.completion.eventId});
+            return;
+          }
           if (m.method === 'thread.snapshot' || m.method === 'thread.update') streams.publish(m);
           else for (const c of clients.keys()) send(c, m);
           return;
@@ -149,9 +158,13 @@ wss.on("connection", (ws, req) => {
           return;
         }
         clients.set(ws, m.deviceId);
+        if (m.notificationClient === true) notificationClients.add(ws);
         streams.register(ws, m.snapshotDeltas === true, m.threadId);
         clearTimeout(deadline);
-        send(ws, { type: "host", online: bridge?.readyState === 1, epoch });
+        send(ws, { type: "host", online: bridge?.readyState === 1, epoch,
+          ...(m.notificationClient === true ? {notificationCursor:completionStore.latest()} : {}) });
+        if (m.notificationClient === true && Number.isInteger(m.notificationCursor) && m.notificationCursor >= 0)
+          for (const event of completionStore.after(m.notificationCursor)) send(ws,{type:'completion',...event});
         return;
       }
       if (m.type === "pair.request") {

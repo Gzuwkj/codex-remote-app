@@ -97,6 +97,7 @@ export function projectThread(state: any, revision: number): RemoteThread {
       (t) => t.status === "inProgress" || t.status === "in_progress"
     )?.turnId,
     lastTurnStatus: turns.at(-1)?.status,
+    lastTurnId: turns.at(-1)?.turnId,
     items,
     requests: state.requests ?? [],
   };

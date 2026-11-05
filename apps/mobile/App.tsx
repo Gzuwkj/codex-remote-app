@@ -32,6 +32,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import Clipboard from '@react-native-clipboard/clipboard';
 import Markdown from 'react-native-markdown-display';
 import { client, type Thread } from './src/client';
+import {enableNotifications, disableNotifications, restoreNotifications, notificationStatus, type NotificationStatus} from './src/notifications';
 import { RequestCard } from './src/RequestCard';
 import { MarkdownImage, isDesktopFile } from './src/MarkdownImage';
 import {
@@ -96,6 +97,9 @@ function RemoteScreen() {
     [code, setCode] = useState(''),
     [error, setError] = useState(''),
     [notice, setNotice] = useState('');
+  const [notifications, setNotifications] = useState<NotificationStatus>({enabled:false,permitted:false,connected:false,running:false});
+  const openChatRef = useRef<(id:string)=>Promise<void>>(async()=>{});
+  const notificationBusy = useRef(false);
   const [catalog, setCatalog] = useState<any[]>([]),
     [projects, setProjects] = useState<any[]>([]),
     [project, setProject] = useState<string | null>(null),
@@ -174,6 +178,26 @@ function RemoteScreen() {
     }
   };
   refreshRef.current = refresh;
+  const refreshNotifications = async (prompt = false) => {
+    if(notificationBusy.current)return;
+    notificationBusy.current=true;
+    try {
+      let status=await restoreNotifications();
+      if(prompt && !(await AsyncStorage.getItem('notification-prompted'))) {
+        await AsyncStorage.setItem('notification-prompted','1');
+        status=await enableNotifications();
+      }
+      setNotifications(status);
+    } catch(e) { setNotifications(await notificationStatus()); toast(errorText(e)); }
+    finally {notificationBusy.current=false;}
+  };
+  const openFromNotification = async () => {
+    const id=await NativeModules.TaskNotifications.consumeOpenThread();
+    if(id) await openChatRef.current(id);
+  };
+  useEffect(()=>{
+    if(!booting && paired) {refreshNotifications(true);openFromNotification();}
+  },[booting,paired]);
   useEffect(() => {
     const listener = (m: any) => {
       if (m.type === 'restored') setPaired(true);
@@ -247,6 +271,8 @@ function RemoteScreen() {
     })();
     const sub = AppState.addEventListener('change', state => {
       if (state === 'active' && client.credentials) {
+        refreshNotifications();
+        openFromNotification();
         if (client.online) refreshRef.current();
         else client.connect();
       }
@@ -361,6 +387,7 @@ function RemoteScreen() {
     ? projects.find(p => normalizePath(p.path ?? '') === normalizePath(project))
         ?.label ?? pathName(project)
     : '所有项目';
+  openChatRef.current = openChat;
   const beginNew = () => {
     Keyboard.dismiss();
     if (drawer) closeDrawer();
@@ -925,7 +952,20 @@ function RemoteScreen() {
             setSheet(null);
             client.connect();
           })}
+          <Text style={[s.sectionLabel, {color:c.muted}]}>任务完成通知</Text>
+          <Text style={{color:c.muted, fontSize:14, lineHeight:21, marginBottom:12}}>
+            {notifications.enabled && notifications.permitted
+              ? '已开启。后台接收已连接聊天的完成提醒，点击通知打开对应聊天。'
+              : '开启后，电脑任务完成时会在手机通知栏提醒。'}
+            {'\n'}后台监听会保留连接通知；强行停止 App 后需重新打开。
+          </Text>
+          {actionRow('refresh', notifications.enabled ? '关闭任务完成通知' : '开启任务完成通知', async () => {
+            try {setNotifications(notifications.enabled ? await disableNotifications() : await enableNotifications());}
+            catch(e) {setNotifications(await notificationStatus());toast(errorText(e));}
+          })}
+          {actionRow('more', '系统通知设置', () => NativeModules.TaskNotifications.openSettings())}
           {actionRow('close', '解除本机配对', async () => {
+            await disableNotifications();
             await client.disconnect();
             client.select(undefined);
             setPaired(false);

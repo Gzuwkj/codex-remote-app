@@ -9,9 +9,11 @@ import {acquireLock} from './lock.js';
 import {startAdmin} from './admin.js';
 import {ThreadPublisher} from './thread-publisher.js';
 import {projectThread} from '../../protocol/src/index.js';
+import {CompletionTracker} from './completions.js';
 const dir = path.resolve(process.env.REMOTE_STATE_DIR ?? ".state");
 mkdirSync(dir, { recursive: true });
 acquireLock(path.join(dir,'bridge.lock'));
+const completions = new CompletionTracker(path.join(dir,'task-completions.json'));
 let epoch = randomUUID();
 let adapter = new DesktopAdapter();
 await adapter.connect();
@@ -40,7 +42,11 @@ if (managed && /^\d+$/.test(process.env.CODEX_DESKTOP_PID ?? '')) {
   }, 2000).unref();
 }
 function attach() {
-  adapter.on('thread', thread => publisher.push(thread));
+  adapter.on('thread', thread => {
+    publisher.push(thread);
+    completions.observe(thread);
+    for (const completion of completions.pending()) send({type:'event',epoch,seq:++seq,method:'task.completed',completion});
+  });
   adapter.once("offline", () => {
     online = false;
     ws?.close(4004, "DESKTOP_OFFLINE");
@@ -110,6 +116,11 @@ function connect() {
     try {
       m = JSON.parse(raw.toString());
       admin?.message(m);
+      if (m.type === 'completion.received') { completions.acknowledge(m.eventId); return; }
+      if (m.type === 'bridge.ready') {
+        for (const completion of completions.pending()) send({type:'event',epoch,seq:++seq,method:'task.completed',completion});
+        for (const id of completions.watched()) adapter.subscribe(id).catch(()=>{});
+      }
       if (m.type === 'stream.resync') {
         const entry = adapter.states.get(m.threadId);
         if (entry) { publisher.reset(m.threadId); publisher.push(projectThread(entry.state, entry.revision)); }

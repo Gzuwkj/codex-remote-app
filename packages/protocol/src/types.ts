@@ -13,6 +13,7 @@ export type RemoteThread = {
   revision: number;
   activeTurnId?: string;
   lastTurnStatus?: string;
+  lastTurnId?: string;
   items: RemoteItem[];
   requests: any[];
 };
