@@ -1,3 +1,4 @@
+import {asyncQuestions,questionReplyText} from './questions.js';
 import type {RemoteThread, RemoteItem} from './types.js';
 export type {RemoteThread, RemoteItem} from './types.js';
 export const protocolVersion = 1;
@@ -75,6 +76,7 @@ export function projectThread(state: any, revision: number): RemoteThread {
             : i.type,
         status: i.status,
         text:
+          (['userMessage','steeringUserMessage'].includes(i.type)?questionReplyText(sourceText):undefined)??
           (i.type==='userMessage'&&phoneAttachments.length?sourceText.slice(0,mobileBlock!.index):undefined)??
           createdInput ??
           i.text ??
@@ -104,6 +106,6 @@ export function projectThread(state: any, revision: number): RemoteThread {
     lastTurnStatus: turns.at(-1)?.status,
     lastTurnId: turns.at(-1)?.turnId,
     items,
-    requests: state.requests ?? [],
+    requests: [...(state.requests ?? []), ...asyncQuestions(turns.flatMap(t=>t.items??[]))],
   };
 }

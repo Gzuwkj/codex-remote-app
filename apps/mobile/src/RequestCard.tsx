@@ -17,13 +17,19 @@ export function RequestCard({
 }) {
   const c = palette(dark);
   const [answers, setAnswers] = useState<Record<string, string>>({}),
-    [busy, setBusy] = useState(false);
+    [busy, setBusy] = useState(false),
+    [submitted,setSubmitted] = useState(false),
+    [messageId] = useState(()=>'question-'+Date.now()+'-'+Math.random().toString(36).slice(2));
   const submit = async (method: string, params: any) => {
     setBusy(true);
     try {
       await client.rpc(method, { threadId, requestId: r.id, ...params });
+      setSubmitted(true);
     } catch (e) {
-      onError((e as Error).message);
+      const error=(e as Error).message;
+      if(/INPUT_REQUEST_EXPIRED|INPUT_ALREADY_SUBMITTED/.test(error)) {
+        setSubmitted(true);onError('这个问题已提交或在另一端处理，请刷新聊天。');
+      } else onError(error);
     } finally {
       setBusy(false);
     }
@@ -32,12 +38,12 @@ export function RequestCard({
     <Pressable
       key={label}
       accessibilityRole="button"
-      disabled={!online || busy || disabled}
+      disabled={!online || busy || submitted || disabled}
       onPress={fn}
       style={{
         backgroundColor:
           label === '允许' || label === '提交回答' ? c.button : c.soft,
-        opacity: !online || busy || disabled ? 0.4 : 1,
+        opacity: !online || busy || submitted || disabled ? 0.4 : 1,
         padding: 12,
         borderRadius: 12,
         marginTop: 8,
@@ -53,9 +59,10 @@ export function RequestCard({
       </Text>
     </Pressable>
   );
+  const asyncInput = r.method === 'desktop/asyncQuestion';
   const command = r.method === 'item/commandExecution/requestApproval',
     file = r.method === 'item/fileChange/requestApproval',
-    input = r.method === 'item/tool/requestUserInput';
+    input = r.method === 'item/tool/requestUserInput' || asyncInput;
   return (
     <View
       style={{
@@ -66,8 +73,9 @@ export function RequestCard({
       }}
     >
       <Text style={{ fontWeight: '700', fontSize: 17, color: c.text }}>
-        电脑请求确认
+        {input ? '问题 · 等待你的回答' : '电脑请求确认'}
       </Text>
+      {submitted && <Text style={{color:c.muted,marginTop:8}}>已提交，正在同步电脑状态…</Text>}
       {command || file ? (
         <>
           <Text selectable style={{ color: c.text }}>
@@ -91,13 +99,21 @@ export function RequestCard({
           {(r.params?.questions ?? []).map((q: any) => (
             <View key={q.id}>
               <Text style={{ color: c.text, marginTop: 10 }}>{q.question}</Text>
-              {q.options?.map((o: any) =>
-                action(o.label, () =>
-                  setAnswers({ ...answers, [q.id]: o.label }),
-                ),
-              )}
+              {q.options?.map((o: any) => (
+                <Pressable key={o.label} accessibilityRole="radio" accessibilityLabel={o.label}
+                  accessibilityState={{checked:answers[q.id]===o.label,disabled:!online||busy||submitted}}
+                  disabled={!online||busy||submitted} onPress={()=>setAnswers({...answers,[q.id]:o.label})}
+                  style={{padding:12,marginTop:8,borderRadius:12,borderWidth:1,borderColor:answers[q.id]===o.label?c.text:c.line,backgroundColor:c.soft}}>
+                  <Text style={{color:c.text,fontWeight:answers[q.id]===o.label?'700':'400'}}>{answers[q.id]===o.label?'◉ ':'○ '}{o.label}</Text>
+                  {!!o.description&&<Text style={{color:c.muted,marginTop:4}}>{o.description}</Text>}
+                </Pressable>
+              ))}
               <TextInput
                 accessibilityLabel={q.header ?? q.question}
+                placeholder="也可以填写自己的回答"
+                placeholderTextColor={c.muted}
+                editable={online && !busy && !submitted}
+                secureTextEntry={q.isSecret === true}
                 value={answers[q.id] ?? ''}
                 onChangeText={text => setAnswers({ ...answers, [q.id]: text })}
                 style={{
@@ -113,7 +129,7 @@ export function RequestCard({
           {action(
             '提交回答',
             () =>
-              submit('input/respond', {
+              asyncInput ? submit('async-input/respond', {answer: answers[r.params.questions[0].id], messageId}) : submit('input/respond', {
                 response: {
                   answers: Object.fromEntries(
                     Object.entries(answers).map(([id, text]) => [

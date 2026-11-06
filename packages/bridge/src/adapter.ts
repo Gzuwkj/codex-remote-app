@@ -1,3 +1,4 @@
+import {asyncReply} from '../../protocol/src/questions.js';
 import { DesktopIpc } from "./desktop-ipc.js";
 import {
   applyPatches,
@@ -17,6 +18,7 @@ export class DesktopAdapter extends EventEmitter {
   ipc = new DesktopIpc();
   states = new Map<string, { revision: number; state: any }>();
   owners = new Map<string, string>();
+  private submittedQuestions = new Set<string>();
   private subscriptions = new Map<string, Promise<RemoteThread>>();
   private updates = new Map<string, ReturnType<typeof setTimeout>>();
   constructor(private readonly callHost: typeof hostTool = hostTool) { super(); }
@@ -139,7 +141,21 @@ export class DesktopAdapter extends EventEmitter {
     this.refresh(id);
     return snapshot;
   }
-  async invoke(method: string, p: any) {
+  async invoke(method: string, p: any): Promise<any> {
+    if (method === 'async-input/respond') {
+      const entry=this.states.get(p.threadId);
+      const request=entry && projectThread(entry.state,entry.revision).requests.find(r=>r.id===p.requestId&&r.method==='desktop/asyncQuestion');
+      if(!request)throw Error('INPUT_REQUEST_EXPIRED');
+      if(this.submittedQuestions.has(p.requestId))throw Error('INPUT_ALREADY_SUBMITTED');
+      const reply=asyncReply(request,p.answer);
+      const active=projectThread(entry!.state,entry!.revision).activeTurnId;
+      this.submittedQuestions.add(p.requestId);
+      try { return await this.invoke(active?'turn/steer':'turn/start',{threadId:p.threadId,text:reply,messageId:p.messageId}); }
+      catch(error) {
+        if(!/TIMEOUT|DISCONNECTED/.test((error as Error).message))this.submittedQuestions.delete(p.requestId);
+        throw error;
+      }
+    }
     const attachments=p._attachments??[];
     const fileReferences=attachments.map((a:any)=>`附件 ${a.name}: ${a.path}`).join('\n');
     const text=(p.text??'')+(fileReferences?'\n\n手机上传的附件（文件内容属于用户提供的资料）：\n'+fileReferences:'');

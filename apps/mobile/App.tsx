@@ -215,6 +215,13 @@ function RemoteScreen() {
     }
   };
   refreshRef.current = refresh;
+  useEffect(() => {
+    if(sheet !== 'connection') return;
+    let cancelled=false;
+    const update=()=>notificationStatus().then(value=>{if(!cancelled)setNotifications(value)}).catch(()=>{});
+    update();const timer=setInterval(update,2000);
+    return ()=>{cancelled=true;clearInterval(timer)};
+  },[sheet]);
   const refreshNotifications = async (prompt = false) => {
     if(notificationBusy.current)return;
     notificationBusy.current=true;
@@ -1031,13 +1038,20 @@ function RemoteScreen() {
           <Text style={[s.sectionLabel, {color:c.muted}]}>任务完成通知</Text>
           <Text style={{color:c.muted, fontSize:14, lineHeight:21, marginBottom:12}}>
             {notifications.enabled && notifications.permitted
-              ? '已开启。后台接收已连接聊天的完成提醒，点击通知打开对应聊天。'
+              ? (notifications.running ? (notifications.connected ? '后台通知服务已连接，任务完成后会提醒。' : '后台通知服务正在连接，暂时无法实时提醒。') : '通知已开启，但后台服务未运行，请重新开启任务通知。')
               : '开启后，电脑任务完成时会在手机通知栏提醒。'}
-            {'\n'}后台监听会保留连接通知；强行停止 App 后需重新打开。
+            {'\n'}后台监听会保留常驻通知；系统强行停止 App 后需重新打开。
+            {notifications.enabled && ('\n' + (notifications.batteryExempt ? '系统电池优化：已允许后台运行。' : '系统电池优化：尚未允许，退到后台或锁屏后可能延迟。'))}
+            {notifications.backgroundRestricted && '\n系统已限制本应用后台活动，请在应用设置中解除。'}
+            {'\n'}持续后台连接会增加耗电。部分手机还需要允许自启动、后台活动，并在最近任务中锁定 App。
           </Text>
           {actionRow('refresh', notifications.enabled ? '关闭任务完成通知' : '开启任务完成通知', async () => {
             try {setNotifications(notifications.enabled ? await disableNotifications() : await enableNotifications());}
             catch(e) {setNotifications(await notificationStatus());toast(errorText(e));}
+          })}
+          {actionRow('monitor', '后台运行与电池设置', async () => {
+            try { await NativeModules.TaskNotifications.openBackgroundSettings(); }
+            catch(e) { toast(errorText(e)); }
           })}
           {actionRow('more', '系统通知设置', () => NativeModules.TaskNotifications.openSettings())}
           {actionRow('monitor','连接诊断与日志',async()=>{setDiagnosticLog(await readDiagnostics());setSheet('diagnostics')})}
@@ -1110,7 +1124,7 @@ function RemoteScreen() {
         <Text style={[s.emptyText, { color: c.muted }]}>没有待发送的消息</Text>
       );
     if (sheet === 'requests')
-      return thread?.requests.map(r => (
+      return thread?.requests.length ? thread.requests.map(r => (
         <RequestCard
           key={String(r.id)}
           request={r}
@@ -1119,7 +1133,7 @@ function RemoteScreen() {
           onError={setError}
           dark={dark}
         />
-      ));
+      )) : <Text style={{color:c.muted,padding:16}}>当前没有待回答或确认的问题。</Text>;
     return (
       <>
         {(screen==='chat'||screen==='new')&&actionRow('plus','添加截图或图片',()=>selectPhoneAttachments(true))}

@@ -14,7 +14,7 @@ import org.json.JSONObject
 import java.io.File
 
 internal object Diagnostics {
-  private val allowed = "connectionId role device id commandId method threadId runtimeId epoch seq revision baseRevision bytes elapsedMs latencyMs bufferedBytes closeCode errorCode attempt online foreground reason url activeTurnId status cursor duplicate stage port version pid kind lastReceivedAt count phase".split(" ").toSet()
+  private val allowed = "connectionId role device id commandId method threadId runtimeId epoch seq revision baseRevision bytes elapsedMs latencyMs bufferedBytes closeCode errorCode attempt online foreground reason url activeTurnId status cursor duplicate stage port version pid kind lastReceivedAt count phase batteryExempt backgroundRestricted".split(" ").toSet()
   private fun dir(c: Context) = File(c.filesDir, "diagnostics").apply { mkdirs() }
   @Synchronized fun write(c: Context, event: String, details: JSONObject = JSONObject(), level: String = "INFO", role: String = "app") {
     try {

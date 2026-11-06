@@ -17,7 +17,7 @@ import {RelayHeartbeat} from './relay-heartbeat.js';
 const dir = path.resolve(process.env.REMOTE_STATE_DIR ?? ".state");
 mkdirSync(dir, { recursive: true });
 const logger=createLogger(path.join(dir,'logs'),'bridge');
-logger.log('bridge.start',{version:'0.5.2'});
+logger.log('bridge.start',{version:'0.5.3'});
 process.on('uncaughtExceptionMonitor',error=>logger.log('process.fatal',{errorCode:diagnosticError(error)},'ERROR'));
 acquireLock(path.join(dir,'bridge.lock'));
 const completions = new CompletionTracker(path.join(dir,'task-completions.json'));

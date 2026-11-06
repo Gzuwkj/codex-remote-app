@@ -5,6 +5,10 @@ export type NotificationStatus = {
   permitted: boolean;
   connected: boolean;
   running: boolean;
+  batteryExempt?: boolean;
+  backgroundRestricted?: boolean;
+  manufacturer?: string;
+  lastReceivedAt?: number;
 };
 export const notificationStatus = (): Promise<NotificationStatus> =>
   NativeModules.TaskNotifications.status();
