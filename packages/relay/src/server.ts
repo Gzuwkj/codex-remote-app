@@ -15,7 +15,7 @@ import {diagnosticError} from '../../protocol/src/diagnostics.js';
 const dir = path.resolve(process.env.REMOTE_STATE_DIR ?? ".state");
 mkdirSync(dir, { recursive: true });
 const logger=createLogger(path.join(dir,'logs'),'relay');
-logger.log('relay.start',{version:'0.5.0'});
+logger.log('relay.start',{version:'0.5.1'});
 process.on('uncaughtExceptionMonitor',error=>logger.log('process.fatal',{errorCode:diagnosticError(error)},'ERROR'));
 const credentialFile = path.join(dir, "bridge-token");
 let bridgeToken: string;
@@ -94,12 +94,16 @@ wss.on("connection", (ws, req) => {
       if (m.type === "bridge.auth") {
         if (
           !equal(String(m.token ?? ""), bridgeToken) ||
-          bridge?.readyState === 1
+          (bridge?.readyState === 1 && m.epoch !== epoch) ||
+          typeof m.epoch !== 'string' || !m.epoch || m.epoch.length>100
         ) {
           ws.close(4003, "BRIDGE_AUTH_FAILED");
           return;
         }
+        if(bridge===ws){send(ws,{type:'bridge.ready'});return;}
+        const previous=bridge;
         bridge = ws;
+        if(previous?.readyState===1){auditConnection(previous,'same-runtime-replaced');previous.close(4005,'BRIDGE_CONNECTION_REPLACED');}
         connections.get(ws)!.role='bridge';auditConnection(ws,'authenticated');
         streams.reset();
         epoch = m.epoch;

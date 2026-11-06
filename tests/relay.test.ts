@@ -50,8 +50,8 @@ test("relay requires authentication, desktop approval, one-time pairing, and dev
       if (code) reject(Error("RELAY_EXIT"));
     });
   });
-  const bridge = await open(),
-    phone = await open(),
+  let bridge = await open();
+  const phone = await open(),
     intruder = await open();
   t.after(() => {
     bridge.terminate();
@@ -137,6 +137,20 @@ test("relay requires authentication, desktop approval, one-time pairing, and dev
   const duplicate=wait(bridge,m=>m.type==='completion.received'&&m.eventId===second.eventId);
   bridge.send(JSON.stringify({type:'event',method:'task.completed',completion:second}));await duplicate;
   assert.equal(count,1);
+  const otherRuntime=await open();t.after(()=>otherRuntime.terminate());
+  const otherClosed=onceClosed(otherRuntime);
+  otherRuntime.send(JSON.stringify({type:'bridge.auth',token:'dedicated-test-token',epoch:'different-runtime',pairCode:'654321'}));
+  assert.equal(await otherClosed,4003);
+  const invalidBridge=await open();t.after(()=>invalidBridge.terminate());
+  const invalidClosed=onceClosed(invalidBridge);
+  invalidBridge.send(JSON.stringify({type:'bridge.auth',token:'wrong-test-token',epoch:'epoch-test',pairCode:'654321'}));
+  assert.equal(await invalidClosed,4003);
+  const previous=bridge,replacement=await open();t.after(()=>replacement.terminate());
+  const previousClosed=onceClosed(previous),replacementReady=wait(replacement,m=>m.type==='bridge.ready');
+  const hostRestored=wait(phone,m=>m.type==='host'&&m.online===true);
+  replacement.send(JSON.stringify({type:'bridge.auth',token:'dedicated-test-token',epoch:'epoch-test',pairCode:'654321'}));
+  await replacementReady;await hostRestored;assert.equal(await previousClosed,4005);
+  bridge=replacement;
   const listenerRevoked=new Promise<number>(resolve=>listener.once('close',resolve));
   const revoked = new Promise<number>((resolve) =>
     phone.once("close", (code) => resolve(code))
@@ -147,3 +161,4 @@ test("relay requires authentication, desktop approval, one-time pairing, and dev
   assert.equal(await revoked, 4003);
   assert.equal(await listenerRevoked,4003);
 });
+function onceClosed(ws:WebSocket){return new Promise<number>(resolve=>ws.once('close',resolve))}

@@ -13,10 +13,11 @@ import {CompletionTracker} from './completions.js';
 import {createLogger} from '../../protocol/src/node-logger.js';
 import {diagnosticError} from '../../protocol/src/diagnostics.js';
 import {UploadStore} from './uploads.js';
+import {RelayHeartbeat} from './relay-heartbeat.js';
 const dir = path.resolve(process.env.REMOTE_STATE_DIR ?? ".state");
 mkdirSync(dir, { recursive: true });
 const logger=createLogger(path.join(dir,'logs'),'bridge');
-logger.log('bridge.start',{version:'0.5.0'});
+logger.log('bridge.start',{version:'0.5.1'});
 process.on('uncaughtExceptionMonitor',error=>logger.log('process.fatal',{errorCode:diagnosticError(error)},'ERROR'));
 acquireLock(path.join(dir,'bridge.lock'));
 const completions = new CompletionTracker(path.join(dir,'task-completions.json'));
@@ -33,6 +34,7 @@ const save = () => {
 };
 save();
 let ws: WebSocket;
+let heartbeat:RelayHeartbeat|undefined;
 let seq = 0;
 let online = true;
 const send = (m: unknown) => {
@@ -109,6 +111,7 @@ rl.on("line", (line) => {
 });
 function connect() {
   if (!online) return;
+  heartbeat?.stop();
   const url = process.env.RELAY_URL ?? "ws://127.0.0.1:8787";
   logger.log('relay.connecting',{url,epoch});
   if (
@@ -117,9 +120,18 @@ function connect() {
   )
     throw Error("WSS_REQUIRED");
   ws = new WebSocket(url, { maxPayload: 16 * 1024 * 1024, handshakeTimeout:12000 });
+  const current = ws;
+  const connectionHeartbeat=new RelayHeartbeat(current,(event,details)=>logger.log(event,{...details,epoch},event.endsWith('expired')?'WARN':'INFO'));
+  heartbeat=connectionHeartbeat;
+  let authenticationTimer:ReturnType<typeof setTimeout>|undefined;
   ws.on("open", () => {
     if(ws!==current)return;
     logger.log('relay.socket-open',{epoch});
+    authenticationTimer=setTimeout(()=>{
+      if(ws!==current)return;
+      logger.log('relay.authentication-timeout',{epoch},'WARN');current.terminate();
+    },10000);
+    authenticationTimer.unref?.();
     publisher.reset();
     lastStatuses='';
     const pairCode = String(randomInt(100000, 1000000));
@@ -133,8 +145,8 @@ function connect() {
     if (!managed) console.log("Pair code (5 minutes, single use): " + pairCode);
   });
   ws.on("error", error => logger.log('relay.error',{errorCode:diagnosticError(error)},'WARN'));
-  const current = ws;
   ws.on("close", (closeCode) => {
+    connectionHeartbeat.stop();if(authenticationTimer)clearTimeout(authenticationTimer);
     if(ws!==current){logger.log('relay.stale-close-ignored',{closeCode});return;}
     logger.log('relay.closed',{closeCode},'WARN');
     publisher.reset();
@@ -152,7 +164,11 @@ function connect() {
       admin?.message(m);
       if (m.type === 'completion.received') { completions.acknowledge(m.eventId); return; }
       if (m.type === 'bridge.ready') {
+        if(authenticationTimer)clearTimeout(authenticationTimer);
+        connectionHeartbeat.start();
         logger.log('relay.authenticated',{epoch});
+        // Rebuild the relay baseline after reconnect, including idle subscribed chats.
+        for(const entry of adapter.states.values())publisher.push(projectThread(entry.state,entry.revision));
         for (const completion of completions.pending()) send({type:'event',epoch,seq:++seq,method:'task.completed',completion});
         for (const id of completions.watched()) adapter.subscribe(id).catch(()=>{});
       }
