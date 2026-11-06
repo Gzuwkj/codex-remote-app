@@ -21,7 +21,7 @@ const bundle = await build({
         build.onLoad({ filter: /.*/, namespace: "native-test" }, (a) => ({
           contents:
             a.path === "react-native"
-              ? "export const NativeModules={Diagnostics:{append(){}}};"
+              ? "export const NativeModules={Diagnostics:{append(){}},TaskNotifications:{selectThread(){},readBackgroundSnapshot:async()=>globalThis.__backgroundSnapshot}};"
               : "export default {getItem:async()=>null,setItem:async()=>{}};export const setGenericPassword=async()=>{};export const resetGenericPassword=async()=>{};export const getGenericPassword=async()=>false;",
           loader: "js",
         }));
@@ -193,4 +193,38 @@ test("handshake timeout reconnects, while revoked credentials stop automatic ret
     await client.disconnect();
     globalThis.WebSocket = old;
   }
+});
+
+
+test("long background suspension replaces the UI transport instead of replaying its queued frames",async(t)=>{
+ t.mock.timers.enable({apis:['setTimeout','Date'],now:1000});
+ const old=globalThis.WebSocket;globalThis.WebSocket=Socket as any;
+ const client=new RemoteClient();client.credentials={deviceId:'test',token:'test-token'};
+ try {
+  client.connect();const before=Socket.sockets.at(-1)!;before.open();
+  await before.frame({type:'host',online:true,epoch:'runtime',connectionPing:true});
+  client.setForeground(false);assert.equal(before.sent.at(-1).type,'thread.select');assert.equal(before.sent.at(-1).threadId,undefined);t.mock.timers.tick(5000);
+  assert.equal(await client.resume(),false);const after=Socket.sockets.at(-1)!;
+  assert.notEqual(after,before);assert.equal(before.readyState,3);
+  await before.frame({type:'host',online:true,epoch:'stale-runtime'});assert.equal(client.epoch,'runtime');
+  after.open();await after.frame({type:'host',online:true,epoch:'runtime',connectionPing:true});
+  assert.equal(after.sent.filter(m=>m.type==='command').length,0);
+ } finally {await client.disconnect();globalThis.WebSocket=old}
+});
+
+test("background snapshot restoration requires matching device, runtime and selected chat",async()=>{
+ const old=globalThis.WebSocket,raf=globalThis.requestAnimationFrame;globalThis.WebSocket=Socket as any;
+ globalThis.requestAnimationFrame=((cb:any)=>{cb();return 1}) as any;
+ const client=new RemoteClient();client.credentials={deviceId:'test',token:'test-token'};client.select('qa');
+ try {
+  client.connect();const socket=Socket.sockets.at(-1)!;socket.open();await socket.frame({type:'host',online:true,epoch:'runtime',connectionPing:true});
+  const events:any[]=[];client.listeners.add((e:any)=>events.push(e));
+  const thread={id:'qa',revision:20,title:'Native latest',items:[],requests:[]};
+  (globalThis as any).__backgroundSnapshot=JSON.stringify({deviceId:'other',epoch:'runtime',thread});
+  await client.restoreBackground();assert.equal(events.length,0);
+  (globalThis as any).__backgroundSnapshot=JSON.stringify({deviceId:'test',epoch:'old-runtime',thread});
+  await client.restoreBackground();assert.equal(events.length,0);
+  (globalThis as any).__backgroundSnapshot=JSON.stringify({deviceId:'test',epoch:'runtime',thread});
+  await client.restoreBackground();assert.equal(events.at(-1).thread.revision,20);
+ } finally {delete (globalThis as any).__backgroundSnapshot;await client.disconnect();globalThis.WebSocket=old;globalThis.requestAnimationFrame=raf}
 });

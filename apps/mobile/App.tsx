@@ -330,7 +330,9 @@ function RemoteScreen() {
       if (state === 'active' && client.credentials) {
         refreshNotifications();
         openFromNotification();
-        client.resume().then(alive=>{if(alive)refreshRef.current()});
+        const resumed=client.resume();
+        client.restoreBackground().catch(()=>{});
+        resumed.then(alive=>{if(alive)refreshRef.current()});
       }
     });
     return () => {
@@ -1510,7 +1512,7 @@ function RemoteScreen() {
                     numberOfLines={1}
                     style={{ color: c.muted, fontSize: 12 }}
                   >
-                    {online
+                    {refreshing ? '正在同步最新状态…' : online
                       ? projects.find(
                           p =>
                             normalizePath(p.path ?? '') ===

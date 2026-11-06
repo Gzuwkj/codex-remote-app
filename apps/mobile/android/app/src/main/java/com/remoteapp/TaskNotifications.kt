@@ -22,6 +22,8 @@ import com.facebook.react.uimanager.ViewManager
 import okhttp3.*
 import org.json.JSONObject
 import java.security.KeyStore
+import java.util.concurrent.Executors
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -29,6 +31,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 internal object NotificationState {
+  @Volatile var service: TaskNotificationService? = null
   @Volatile var visible = false
   @Volatile var connected = false
   @Volatile var running = false
@@ -99,6 +102,15 @@ class TaskNotificationModule(private val c: ReactApplicationContext) : ReactCont
     NotificationState.prefs(c).edit().putBoolean("enabled", false).remove("credentials").remove("cursor").commit()
     c.stopService(Intent(c, TaskNotificationService::class.java)); promise.resolve(null)
   }
+  @ReactMethod fun selectThread(id: String) {
+    if(id.isNotEmpty()&&!Regex("[a-zA-Z0-9_-]{1,100}").matches(id))return
+    NotificationState.prefs(c).edit().putString("selectedThread",id).commit()
+    NotificationState.service?.foregroundChanged()
+  }
+  @ReactMethod fun readBackgroundSnapshot(id: String, promise: Promise) {
+    try { promise.resolve(BackgroundThreadStore(c).read(id,NotificationState.credentials(c).getString("deviceId"))) }
+    catch (_: Exception) { promise.resolve(null) }
+  }
   @ReactMethod fun consumeOpenThread(promise: Promise) {
     val p = NotificationState.prefs(c); val id = p.getString("openThread", null)
     p.edit().remove("openThread").commit(); promise.resolve(id)
@@ -125,6 +137,21 @@ class TaskNotificationService : Service() {
   private var stopped = false
   private var generation = 0
   private var retries = 0
+  private var epoch = ""
+  private val cacheIo = Executors.newSingleThreadExecutor()
+  private val backgroundStore by lazy { BackgroundThreadStore(this) }
+  private fun backgroundThread(): String = if(NotificationState.visible) "" else NotificationState.prefs(this).getString("selectedThread", "") ?: ""
+  fun foregroundChanged() { handler.post { if(!stopped) selectBackgroundThread() } }
+  private fun selectBackgroundThread() {
+    if(!NotificationState.connected || socket==null)return
+    val id=backgroundThread()
+    socket?.send(JSONObject().put("type","thread.select").put("threadId",if(id.isBlank())JSONObject.NULL else id).toString())
+    if(id.isNotBlank()) readBackgroundThread(id)
+  }
+  private fun readBackgroundThread(id: String) {
+    if(epoch.isBlank())return
+    socket?.send(JSONObject().put("type","command").put("id","native-read-"+UUID.randomUUID()).put("epoch",epoch).put("method","thread/read").put("params",JSONObject().put("threadId",id)).toString())
+  }
   private var retryTask: Runnable? = null
   private var authTask: Runnable? = null
   private var network: Network? = null
@@ -155,7 +182,7 @@ class TaskNotificationService : Service() {
   override fun onBind(intent: Intent?) = null
   override fun onCreate() {
     Diagnostics.write(this, "notification.service-start", role = "notifications")
-    super.onCreate(); NotificationState.running = true
+    super.onCreate(); NotificationState.running = true; NotificationState.service = this
     NotificationState.connected = false
     val manager = getSystemService(NotificationManager::class.java)
     if (Build.VERSION.SDK_INT >= 26) {
@@ -209,7 +236,7 @@ class TaskNotificationService : Service() {
       private fun owns(ws: WebSocket) = !stopped && current == generation && socket === ws
       override fun onOpen(ws: WebSocket, response: Response) { handler.post {
         if (!owns(ws)) { ws.cancel(); return@post }
-        ws.send(JSONObject().put("type", "device.auth").put("deviceId", config.getString("deviceId")).put("token", config.getString("token")).put("snapshotDeltas", true).put("notificationClient", true).put("notificationCursor", NotificationState.prefs(this@TaskNotificationService).getLong("cursor", -1)).toString())
+        ws.send(JSONObject().put("type", "device.auth").put("deviceId", config.getString("deviceId")).put("token", config.getString("token")).put("snapshotDeltas", true).put("threadId", backgroundThread().ifBlank { null }).put("notificationClient", true).put("notificationCursor", NotificationState.prefs(this@TaskNotificationService).getLong("cursor", -1)).toString())
       } }
       override fun onMessage(ws: WebSocket, text: String) { handler.post {
         if (!owns(ws)) return@post
@@ -220,10 +247,26 @@ class TaskNotificationService : Service() {
             "host" -> {
               authTask?.let { handler.removeCallbacks(it) }; authTask = null
               retries = 0
+              epoch = m.optString("epoch")
               if (!NotificationState.prefs(this@TaskNotificationService).contains("cursor") && m.has("notificationCursor")) NotificationState.prefs(this@TaskNotificationService).edit().putLong("cursor", m.getLong("notificationCursor")).commit()
               connection(m.optBoolean("online"), if (m.optBoolean("online")) "正在接收电脑任务状态" else "电脑离线，正在等待恢复")
+              selectBackgroundThread()
             }
             "completion" -> complete(m)
+            "event", "command.result" -> {
+              val id=backgroundThread()
+              val frame=if(m.optString("type")=="command.result" && m.optString("id").contains(":native-read-") && m.optJSONObject("result")?.optString("id")==id)
+                JSONObject().put("epoch",epoch).put("method","thread.snapshot").put("thread",m.getJSONObject("result")) else m
+              if(id.isNotBlank() && frame.optString("method") in listOf("thread.snapshot","thread.update")) {
+                cacheIo.execute {
+                  try { backgroundStore.apply(frame,config.getString("deviceId"),id) }
+                  catch(e: Exception) {
+                    Diagnostics.write(this@TaskNotificationService,"background.cache-gap",JSONObject().put("errorCode",e.javaClass.simpleName),"WARN","notifications")
+                    handler.post { if(owns(ws) && backgroundThread()==id) readBackgroundThread(id) }
+                  }
+                }
+              }
+            }
           }
         } catch (e: Exception) {
           Diagnostics.write(this@TaskNotificationService, "notification.invalid-event", JSONObject().put("errorCode", e.javaClass.simpleName), "WARN", "notifications")
@@ -277,7 +320,8 @@ class TaskNotificationService : Service() {
   }
   override fun onDestroy() {
     Diagnostics.write(this, "notification.service-stop", role = "notifications")
-    stopped = true; generation++
+    stopped = true; generation++; NotificationState.service = null
+    cacheIo.shutdown()
     try { connectivity.unregisterNetworkCallback(networkCallback) } catch (_: Exception) { }
     try { unregisterReceiver(powerReceiver) } catch (_: Exception) { }
     handler.removeCallbacksAndMessages(null); socket?.cancel(); socket = null

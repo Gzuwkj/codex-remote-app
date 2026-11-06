@@ -1,3 +1,4 @@
+import {NativeModules} from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Keychain from 'react-native-keychain';
 import { DEFAULT_RELAY_URL } from './config';
@@ -24,6 +25,7 @@ export class RemoteClient {
   seq = 0;
   stopped = false;
   private foreground = true;
+  private backgroundAt?:number;
   private authenticated = false;
   private heartbeatSupported = false;
   private lastReceived = 0;
@@ -56,7 +58,7 @@ export class RemoteClient {
   }
   diagnostics() {
     return {
-      version: '0.5.3',
+      version: '0.5.4',
       url: this.url
         .replace(/[?#].*$/, '')
         .replace(/\/\/[^/@]+@/, '//[redacted]@'),
@@ -149,8 +151,12 @@ export class RemoteClient {
   }
   setForeground(active: boolean) {
     logDiagnostic('app.visibility', { foreground: active });
+    const changed=this.foreground!==active;
     this.foreground = active;
+    if(changed && this.authenticated && this.ws?.readyState===1)
+      this.ws.send(JSON.stringify({type:'thread.select',threadId:active?this.selected:undefined}));
     if (!active) {
+      this.backgroundAt ??= Date.now();
       if (this.heartbeatTimer) clearTimeout(this.heartbeatTimer);
       this.heartbeatTimer = undefined;
       if (this.probeTimer) clearTimeout(this.probeTimer);
@@ -164,6 +170,12 @@ export class RemoteClient {
   async resume() {
     this.setForeground(true);
     if (!this.credentials) return false;
+    const suspended=this.backgroundAt!==undefined && Date.now()-this.backgroundAt>=1000;
+    this.backgroundAt=undefined;
+    if(suspended){
+      logDiagnostic('connection.foreground-rebuild',{reason:'discard-background-backlog'});
+      this.connect();return false;
+    }
     if (this.ws?.readyState === 0) return false;
     if (!this.authenticated || this.ws?.readyState !== 1) {
       this.connect();
@@ -171,8 +183,19 @@ export class RemoteClient {
     }
     return this.probe();
   }
+  async restoreBackground() {
+    if(!this.selected||!this.credentials)return;
+    const saved=await NativeModules.TaskNotifications?.readBackgroundSnapshot?.(this.selected);
+    if(!saved)return;
+    const snapshot=JSON.parse(saved);
+    if(snapshot.deviceId!==this.credentials.deviceId||snapshot.epoch!==this.epoch||snapshot.thread?.id!==this.selected)return;
+    const thread=this.accept(snapshot.thread);
+    this.deliver({type:'event',epoch:this.epoch,method:'thread.snapshot',thread});
+    logDiagnostic('background.snapshot-restored',{threadId:thread.id,revision:thread.revision});
+  }
   select(id?: string) {
     this.selected = id;
+    NativeModules.TaskNotifications?.selectThread?.(id ?? '');
     for (const key of this.latest.keys())
       if (key !== id) this.latest.delete(key);
     if (this.online && this.ws?.readyState === 1)
@@ -207,7 +230,7 @@ export class RemoteClient {
     // Acknowledge after React has had two frames to commit the visible state.
     requestAnimationFrame(() =>
       requestAnimationFrame(() => {
-        if (this.ws?.readyState === 1 && m.epoch === this.epoch)
+        if (this.foreground && this.authenticated && this.ws?.readyState === 1 && m.epoch === this.epoch)
           this.ws.send(
             JSON.stringify({
               type: 'stream.applied',
@@ -222,6 +245,7 @@ export class RemoteClient {
   }
   private stream(m: any, next: Thread, previous?: Thread) {
     this.accept(next);
+    if(!this.foreground)return;
     if (
       !previous ||
       previous.activeTurnId !== next.activeTurnId ||

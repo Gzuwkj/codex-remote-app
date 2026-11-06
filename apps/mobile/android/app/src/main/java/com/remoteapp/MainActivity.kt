@@ -18,8 +18,8 @@ class MainActivity : ReactActivity() {
     setIntent(intent)
     NotificationState.capture(this, intent)
   }
-  override fun onResume() { super.onResume(); NotificationState.visible = true }
-  override fun onPause() { NotificationState.visible = false; super.onPause() }
+  override fun onResume() { super.onResume(); NotificationState.visible = true; NotificationState.service?.foregroundChanged() }
+  override fun onPause() { NotificationState.visible = false; NotificationState.service?.foregroundChanged(); super.onPause() }
 
   /**
    * Returns the name of the main component registered from JavaScript. This is used to schedule
