@@ -196,7 +196,7 @@ function RemoteScreen() {
           .rpc('thread/list')
           .then(async rows => {
             setCatalog(rows);
-            await AsyncStorage.setItem('catalog', JSON.stringify(rows));
+            await AsyncStorage.setItem('desktop-catalog-v1', JSON.stringify(rows));
           })
           .catch(e => setError(errorText(e))),
         client
@@ -258,8 +258,13 @@ function RemoteScreen() {
         setError(errorText(m.error));
       }
       if(m.type==='event'&&m.method==='catalog.status'){
-        const states=new Map(m.statuses.map((t:any)=>[t.id,t]));
-        setCatalog(previous=>previous.map(row=>({...row,...(states.get(row.id) as object??{})})));
+        if(m.statuses.every((t:any)=>typeof t.cwd==='string'&&typeof t.title==='string')) {
+          setCatalog(m.statuses);
+          AsyncStorage.setItem('desktop-catalog-v1',JSON.stringify(m.statuses)).catch(()=>{});
+        } else {
+          const states=new Map(m.statuses.map((t:any)=>[t.id,t]));
+          setCatalog(previous=>previous.map(row=>({...row,...(states.get(row.id) as object??{})})));
+        }
       }
       if (
         m.type === 'event' &&
@@ -281,7 +286,7 @@ function RemoteScreen() {
     client.listeners.add(listener);
     (async () => {
       try {
-        const rows = await AsyncStorage.getItem('catalog');
+        const rows = await AsyncStorage.getItem('desktop-catalog-v1');
         if (rows) setCatalog(JSON.parse(rows));
         const box = await AsyncStorage.getItem('outbox');
         if (box) {
@@ -635,10 +640,10 @@ function RemoteScreen() {
     lastAssistant = thread?.items
       .filter(i => i.type === 'agentMessage' && i.text)
       .at(-1)?.id;
-  const catalogTitle = (item: any) => shortTitle(titles[item.id] ?? item.title);
+  const catalogTitle = (item: any) => shortTitle(item.title ?? titles[item.id]);
   const visibleChats = catalog.filter(
     item =>
-      (!project || normalizePath(item.cwd) === normalizePath(project)) &&
+      (!project || (item.projectId ? item.projectId === registered.find(p => normalizePath(p.path) === normalizePath(project))?.projectId : normalizePath(item.cwd) === normalizePath(project))) &&
       catalogTitle(item).toLowerCase().includes(search.toLowerCase()),
   );
   const showProjects = () => {
@@ -948,16 +953,7 @@ function RemoteScreen() {
   };
   const renderSheet = () => {
     if (sheet === 'projects') {
-      const options = screen === 'new' ? registered : projects;
-      const paths =
-        screen === 'new'
-          ? []
-          : [...new Set(catalog.map(t => t.cwd))].filter(
-              path =>
-                !options.some(
-                  p => normalizePath(p.path ?? '') === normalizePath(path),
-                ),
-            );
+      const options = registered;
       return (
         <>
           {screen !== 'new' &&
@@ -985,13 +981,7 @@ function RemoteScreen() {
               )}
             </Pressable>
           ))}
-          {paths.map(path =>
-            actionRow('folder', pathName(path), () => {
-              setProject(path);
-              setSheet(null);
-            }),
-          )}
-          {!options.length && !paths.length && (
+          {!options.length && (
             <Text style={[s.emptyText, { color: c.muted }]}>
               连接电脑后，可查看可用项目。
             </Text>
@@ -1449,7 +1439,7 @@ function RemoteScreen() {
                   >
                     {projects.find(
                       p =>
-                        normalizePath(p.path ?? '') === normalizePath(item.cwd),
+                        item.projectId ? p.projectId === item.projectId : normalizePath(p.path ?? '') === normalizePath(item.cwd),
                     )?.label ?? pathName(item.cwd)}
                   </Text>
                 </View>

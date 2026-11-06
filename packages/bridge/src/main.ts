@@ -17,7 +17,7 @@ import {RelayHeartbeat} from './relay-heartbeat.js';
 const dir = path.resolve(process.env.REMOTE_STATE_DIR ?? ".state");
 mkdirSync(dir, { recursive: true });
 const logger=createLogger(path.join(dir,'logs'),'bridge');
-logger.log('bridge.start',{version:'0.5.1'});
+logger.log('bridge.start',{version:'0.5.2'});
 process.on('uncaughtExceptionMonitor',error=>logger.log('process.fatal',{errorCode:diagnosticError(error)},'ERROR'));
 acquireLock(path.join(dir,'bridge.lock'));
 const completions = new CompletionTracker(path.join(dir,'task-completions.json'));
@@ -77,7 +77,7 @@ setInterval(async()=>{
   statusPending=true;
   try{
     const statuses=await adapter.catalogStatuses();
-    const signature=JSON.stringify(statuses.map(t=>({id:t.id,status:t.status})));
+    const signature=JSON.stringify(statuses);
     if(signature!==lastStatuses){lastStatuses=signature;send({type:'event',epoch,seq:++seq,method:'catalog.status',statuses});logger.log('catalog.status',{count:statuses.length});}
     for(const t of statuses)if(t.status==='active'&&!adapter.states.has(t.id))adapter.subscribe(t.id).catch(error=>logger.log('catalog.subscribe-failed',{threadId:t.id,errorCode:diagnosticError(error)},'WARN'));
   }catch(error){logger.log('catalog.status-failed',{errorCode:diagnosticError(error)},'WARN')}

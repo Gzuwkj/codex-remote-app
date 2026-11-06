@@ -19,14 +19,18 @@ export class DesktopAdapter extends EventEmitter {
   owners = new Map<string, string>();
   private subscriptions = new Map<string, Promise<RemoteThread>>();
   private updates = new Map<string, ReturnType<typeof setTimeout>>();
+  constructor(private readonly callHost: typeof hostTool = hostTool) { super(); }
   private statusCache?: {at:number;rows:any[]};
   async catalogStatuses(contextThreadId?:string) {
     if(this.statusCache&&Date.now()-this.statusCache.at<3000)return this.statusCache.rows;
     const context=process.env.CODEX_THREAD_ID??[...this.states.keys()][0]??contextThreadId??(await this.catalogRows())[0]?.id;
     if(!context)throw Error('DESKTOP_CONTEXT_UNAVAILABLE');
-    const result=await hostTool('list_threads',{limit:50},context,5000);
-    const rows=[...(result.threads??[]),...(result.pinnedThreads??[])].filter((t:any)=>t.kind==='codex'&&(!t.hostId||t.hostId==='local'))
-      .map((t:any)=>({id:t.id,status:t.status,title:t.title}));
+    const result=await this.callHost('list_threads',{limit:50},context,10000);
+    const seen=new Set<string>();
+    const rows=[...(result.pinnedThreads??[]),...(result.threads??[])].filter((t:any)=>{
+      if(t.kind!=='codex'||t.hostId!=='local'||seen.has(t.id))return false;
+      seen.add(t.id);return true;
+    }).map((t:any)=>({...t,updated_at:t.updatedAt}));
     this.statusCache={at:Date.now(),rows};return rows;
   }
   async connect() {
@@ -88,12 +92,10 @@ export class DesktopAdapter extends EventEmitter {
     );
     return JSON.parse(stdout);
   }
-  async catalog() {
-    const rows=await this.catalogRows();
-    try {
-      const states=new Map((await this.catalogStatuses(rows[0]?.id)).map((t:any)=>[t.id,t]));
-      return rows.map((row:any)=>({...row,...states.get(row.id)}));
-    }catch{return rows.map((row:any)=>({...row,status:this.states.get(row.id)&&projectThread(this.states.get(row.id)!.state,this.states.get(row.id)!.revision).activeTurnId?'active':'unknown'}))}
+  async catalog(contextThreadId?:string) {
+    // SQLite locates a bootstrap context only; it also contains CLI and hidden
+    // sessions, so it must never be a fallback for the desktop-visible catalog.
+    return this.catalogStatuses(contextThreadId);
   }
   refresh(id: string) {
     this.ipc.broadcast(
@@ -145,7 +147,7 @@ export class DesktopAdapter extends EventEmitter {
     if (method === "thread/list") return this.catalog();
     if (method === "thread/read") return this.subscribe(p.threadId);
     if (method === "project/list")
-      return hostTool(
+      return this.callHost(
         "list_projects",
         {},
         p.contextThreadId ??
