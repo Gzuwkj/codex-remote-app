@@ -14,7 +14,7 @@ test('phone catalog uses desktop visible threads, preserving pin order and proje
  const rows=await a.catalog('desktop-context');
  assert.deepEqual(rows.map(t=>t.id),['pinned','visible']);
  assert.equal(rows[0].projectId,'project-a');assert.equal(rows[1].updated_at,10);
- assert.deepEqual(calls,[{name:'list_threads',args:{limit:50}}]);
+ assert.deepEqual(calls,[{name:'list_threads',args:{mode:'history',source:'codex',hostId:'local',limit:50}}]);
  assert.equal((await a.catalogStatuses('desktop-context'))[0].id,'pinned');assert.equal(calls.length,1);
 });
 

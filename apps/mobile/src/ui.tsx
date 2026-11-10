@@ -52,7 +52,8 @@ export type IconName =
   | 'terminal'
   | 'file'
   | 'image'
-  | 'settings';
+  | 'settings'
+  | 'mic';
 export function Icon({
   name,
   size = 22,
@@ -63,6 +64,7 @@ export function Icon({
   color?: string;
 }) {
   const shapes: Record<IconName, React.ReactNode> = {
+    mic: <><Path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><Path d="M5 10v2a7 7 0 0 0 14 0v-2m-7 9v3m-4 0h8"/></>,
     menu: (
       <>
         <Line x1="4" y1="7" x2="20" y2="7" />

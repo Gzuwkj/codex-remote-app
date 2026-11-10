@@ -35,6 +35,7 @@ import { client, type Thread } from './src/client';
 import {enableNotifications, disableNotifications, restoreNotifications, notificationStatus, type NotificationStatus} from './src/notifications';
 import {readDiagnostics,exportDiagnostics} from './src/diagnostics';
 import {pickAttachments,uploadAttachments,type PhoneAttachment} from './src/attachments';
+import { VoiceInputButton } from './src/VoiceInputButton';
 import { RequestCard } from './src/RequestCard';
 import { MarkdownImage, isDesktopFile } from './src/MarkdownImage';
 import {
@@ -186,32 +187,39 @@ function RemoteScreen() {
     setThread(next);
     setTitles(previous => ({ ...previous, [next.id]: next.title }));
   };
+  const refreshAttempt = useRef(0);
   const refresh = async () => {
     if (!client.online) return;
+    const attempt = ++refreshAttempt.current;
+    const socket = client.ws;
+    const epoch = client.epoch;
+    const current = () => attempt === refreshAttempt.current && socket === client.ws && epoch === client.epoch;
     setRefreshing(true);
+    setError('');
     const id = client.selected;
     try {
       await Promise.allSettled([
         client
           .rpc('thread/list')
           .then(async rows => {
+            if (!current()) return;
             setCatalog(rows);
             await AsyncStorage.setItem('desktop-catalog-v1', JSON.stringify(rows));
           })
-          .catch(e => setError(errorText(e))),
+          .catch(() => { if (current()) setError('会话列表同步失败，已保留现有列表，可下拉重试。'); }),
         client
           .rpc('project/list')
-          .then(value => setProjects(value.projects ?? []))
+          .then(value => { if (current()) setProjects(value.projects ?? []); })
           .catch(() => {}),
         id
           ? client
               .rpc('thread/read', { threadId: id })
-              .then(acceptThread)
-              .catch(e => setError(errorText(e)))
+              .then(value => { if (current()) acceptThread(value); })
+              .catch(e => { if (current() && client.selected === id) setError(errorText(e)); })
           : Promise.resolve(),
       ]);
     } finally {
-      setRefreshing(false);
+      if (attempt === refreshAttempt.current) setRefreshing(false);
     }
   };
   refreshRef.current = refresh;
@@ -816,6 +824,8 @@ function RemoteScreen() {
   };
 
   const composer = (isNew: boolean) => {
+    const voiceThread=client.selected;
+    const voiceScope=attachmentScope.current;
     const text = isNew ? newPrompt : draft,
       active = !isNew && !!thread?.activeTurnId,
       hasContent=!!text.trim()||attachments.length>0;
@@ -891,6 +901,12 @@ function RemoteScreen() {
               )}
             </View>
             <View style={ui.row}>
+              {!isNew && <VoiceInputButton key={voiceThread} colors={c} onError={toast} onResult={file=>{
+                if(client.selected!==voiceThread || attachmentScope.current!==voiceScope)return;
+                if(attachmentRef.current.length>=5){toast('每条消息最多添加 5 个附件');return;}
+                saveAttachments([...attachmentRef.current,file]);
+                toast('录音已添加，发送后传到电脑');
+              }}/>}
               {active && hasContent && (
                 <IconButton
                   name="stop"

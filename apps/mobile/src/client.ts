@@ -58,7 +58,7 @@ export class RemoteClient {
   }
   diagnostics() {
     return {
-      version: '0.5.4',
+      version: '0.5.6',
       url: this.url
         .replace(/[?#].*$/, '')
         .replace(/\/\/[^/@]+@/, '//[redacted]@'),

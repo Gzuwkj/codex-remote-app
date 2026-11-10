@@ -11,7 +11,7 @@ import com.facebook.react.defaults.DefaultReactNativeHost
 
 class MainApplication : Application(), ReactApplication {
   override val reactNativeHost: ReactNativeHost = object : DefaultReactNativeHost(this) {
-    override fun getPackages() = PackageList(this).packages.apply { add(ArtifactPackage()); add(NotificationPackage()) }
+    override fun getPackages() = PackageList(this).packages.apply { add(ArtifactPackage()); add(NotificationPackage()); add(VoiceInputPackage()) }
     override fun getJSMainModuleName(): String = "index"
     override fun getUseDeveloperSupport(): Boolean = BuildConfig.DEBUG
     override val isNewArchEnabled: Boolean = BuildConfig.IS_NEW_ARCHITECTURE_ENABLED

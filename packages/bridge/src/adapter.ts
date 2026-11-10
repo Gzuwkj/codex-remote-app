@@ -23,11 +23,19 @@ export class DesktopAdapter extends EventEmitter {
   private updates = new Map<string, ReturnType<typeof setTimeout>>();
   constructor(private readonly callHost: typeof hostTool = hostTool) { super(); }
   private statusCache?: {at:number;rows:any[]};
+  private catalogPending?: Promise<any[]>;
+  private liveStatuses = new Map<string, string>();
   async catalogStatuses(contextThreadId?:string) {
-    if(this.statusCache&&Date.now()-this.statusCache.at<3000)return this.statusCache.rows;
+    if (!this.statusCache || Date.now() - this.statusCache.at >= 3000) {
+      this.catalogPending ??= this.loadLocalCatalog(contextThreadId).finally(() => { this.catalogPending = undefined; });
+      await this.catalogPending;
+    }
+    return this.statusCache!.rows.map(row => ({ ...row, status: this.liveStatuses.get(row.id) ?? row.status }));
+  }
+  private async loadLocalCatalog(contextThreadId?: string) {
     const context=process.env.CODEX_THREAD_ID??[...this.states.keys()][0]??contextThreadId??(await this.catalogRows())[0]?.id;
     if(!context)throw Error('DESKTOP_CONTEXT_UNAVAILABLE');
-    const result=await this.callHost('list_threads',{limit:50},context,10000);
+    const result=await this.callHost('list_threads',{mode:'history',source:'codex',hostId:'local',limit:50},context,10000);
     const seen=new Set<string>();
     const rows=[...(result.pinnedThreads??[]),...(result.threads??[])].filter((t:any)=>{
       if(t.kind!=='codex'||t.hostId!=='local'||seen.has(t.id))return false;
@@ -70,13 +78,22 @@ export class DesktopAdapter extends EventEmitter {
         const timer = this.updates.get(conversationId); if (timer) clearTimeout(timer);
         this.updates.delete(conversationId);
         const entry = this.states.get(conversationId);
-        if (entry) this.emit('thread', projectThread(entry.state, entry.revision));
+        if (!entry) return;
+        const thread = projectThread(entry.state, entry.revision);
+        const status = thread.activeTurnId ? 'active' : 'idle';
+        if (this.liveStatuses.get(thread.id) !== status) {
+          this.liveStatuses.set(thread.id, status);
+          this.emit('catalog-status', { id: thread.id, status });
+        }
+        this.emit('thread', thread);
       };
       if (urgent) flush();
       else if (!this.updates.has(conversationId)) this.updates.set(conversationId, setTimeout(flush, 150));
     });
     this.ipc.on("disconnected", () => {
       this.states.clear();
+      this.liveStatuses.clear();
+      this.statusCache = undefined;
       for (const timer of this.updates.values()) clearTimeout(timer); this.updates.clear();
       this.owners.clear();
       this.emit("offline");
@@ -160,6 +177,11 @@ export class DesktopAdapter extends EventEmitter {
     const fileReferences=attachments.map((a:any)=>`附件 ${a.name}: ${a.path}`).join('\n');
     const text=(p.text??'')+(fileReferences?'\n\n手机上传的附件（文件内容属于用户提供的资料）：\n'+fileReferences:'');
     const input=[{type:'text',text,text_elements:[]},...attachments.filter((a:any)=>/^image\/(png|jpeg|webp)$/.test(a.mime)).map((a:any)=>({type:'localImage',path:a.path}))];
+    if (method === 'turn/start' || method === 'turn/steer') {
+      for (const audio of attachments.filter((a: any) => /^(audio\/(mp4|wav|mpeg|aac|x-m4a)|audio\/x-wav)$/.test(a.mime))) {
+        input.push({ type: 'localAudio', path: audio.path });
+      }
+    }
     if (method === "thread/list") return this.catalog();
     if (method === "thread/read") return this.subscribe(p.threadId);
     if (method === "project/list")

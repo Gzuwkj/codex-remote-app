@@ -17,7 +17,7 @@ import {RelayHeartbeat} from './relay-heartbeat.js';
 const dir = path.resolve(process.env.REMOTE_STATE_DIR ?? ".state");
 mkdirSync(dir, { recursive: true });
 const logger=createLogger(path.join(dir,'logs'),'bridge');
-logger.log('bridge.start',{version:'0.5.3'});
+logger.log('bridge.start',{version:'0.5.6'});
 process.on('uncaughtExceptionMonitor',error=>logger.log('process.fatal',{errorCode:diagnosticError(error)},'ERROR'));
 acquireLock(path.join(dir,'bridge.lock'));
 const completions = new CompletionTracker(path.join(dir,'task-completions.json'));
@@ -53,6 +53,9 @@ if (managed && /^\d+$/.test(process.env.CODEX_DESKTOP_PID ?? '')) {
 }
 function attach() {
   const sampled=new Map<string,{at:number;active?:string}>();
+  adapter.on('catalog-status', status => {
+    send({ type: 'event', epoch, seq: ++seq, method: 'catalog.status', statuses: [status] });
+  });
   adapter.on('thread', thread => {
     const last=sampled.get(thread.id);
     if(!last||Date.now()-last.at>=5000||last.active!==thread.activeTurnId){
